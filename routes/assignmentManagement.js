@@ -17,7 +17,8 @@ const {
     // Grading Management
     gradeSubmission,
     getSubmissionsByWeek,
-    getSubmissionsByAssignment
+    getSubmissionsByAssignment,
+    getStudentSubmissionsByTutor,
 } = require("../controllers/assignmentManagementController");
 const { authenticate } = require("../middleware/authentation");
 
@@ -48,6 +49,9 @@ router.post("/submissions/:assignmentId/submit", authenticate, submitAssignment)
 
 // Get student's submissions
 router.get("/submissions/my-submissions", authenticate, getStudentSubmissions);
+
+// Might be used for both students and tutors, with different filters
+router.get("/submissions/student/:id", authenticate, getStudentSubmissionsByTutor);
 
 // Get specific submission by ID (for tutors)
 router.get("/submissions/:submissionId", authenticate, getSubmissionById);

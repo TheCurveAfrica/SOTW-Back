@@ -3,3 +3,4 @@
 test-fake-update.js
 test-fake-delete.js
 test-fake-add.js
+.env

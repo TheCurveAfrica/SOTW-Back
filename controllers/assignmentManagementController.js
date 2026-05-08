@@ -338,6 +338,30 @@ const submitAssignment = async (req, res, next) => {
     }
 };
 
+// Get student's submissions by tutor view (with optional week filter)
+const getStudentSubmissionsByTutor = async (req, res, next) => {
+    try {
+        const studentId = req.params.id;
+        const { week } = req.query;
+
+        let query = { student: studentId };
+        if (week) {
+            // Find assignments for the specific week first
+            const assignments = await Assignment.find({ week: Number(week) });
+            const assignmentIds = assignments.map(a => a._id);
+            query.assignment = { $in: assignmentIds };
+        }
+
+        const submissions = await AssignmentSubmission.find(query)
+            .populate('assignment')
+            .sort({ submittedAt: -1 });
+
+        res.status(200).json({ submissions });
+    } catch (err) {
+        next(ApiError.badRequest(`${err}`));
+    }
+};
+
 // Get student's submissions
 const getStudentSubmissions = async (req, res, next) => {
     try {
@@ -403,6 +427,7 @@ const gradeSubmission = async (req, res, next) => {
         // Update submission with grade and feedback
         submission.grade = grade;
         submission.feedback = feedback;
+        submission.status = "Graded";
         await submission.save();
 
         res.status(200).json({
@@ -497,6 +522,7 @@ module.exports = {
     getAllAssignments,
     updateAssignment,
     deleteAssignment,
+    getStudentSubmissionsByTutor,
     
     // Submission Management
     submitAssignment,
