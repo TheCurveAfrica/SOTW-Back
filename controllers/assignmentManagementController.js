@@ -287,8 +287,12 @@ const submitAssignment = async (req, res, next) => {
         }
 
         // Verify student can submit to this assignment (stack validation)
-        if (assignment.stack !== "General" && assignment.stack.toLowerCase() !== student.stack.toLowerCase()) {
-            return next(ApiError.forbidden("You cannot submit to this   assignment as it is not for your stack"));
+        const normalizeStack = (stack) => stack?.toLowerCase().replace(/\s+/g, "");
+        if (
+            normalizeStack(assignment.stack) !== "general" &&
+            normalizeStack(assignment.stack) !== normalizeStack(student.stack)
+        ) {
+            return next(ApiError.forbidden("You cannot submit to this assignment as it is not for your stack"));
         }
 
         // Check if deadline has passed and late submissions are not allowed
