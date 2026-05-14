@@ -19,6 +19,9 @@ const {
     getSubmissionsByWeek,
     getSubmissionsByAssignment,
     getStudentSubmissionsByTutor,
+
+    // Performance Review
+    getStudentPerformanceReview
 } = require("../controllers/assignmentManagementController");
 const { authenticate } = require("../middleware/authentation");
 
@@ -66,5 +69,9 @@ router.get("/grading/week/:week", authenticate, getSubmissionsByWeek);
 
 // Get submissions by assignment (tutors only)
 router.get("/grading/assignment/:assignmentId", authenticate, getSubmissionsByAssignment);
+
+// ============== PERFORMANCE REVIEW ROUTE ==============
+// Get a student's performance review (tutors/admins/students)
+router.get("/students/:id/performance-review", authenticate, getStudentPerformanceReview);
 
 module.exports = router;

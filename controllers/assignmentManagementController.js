@@ -2,6 +2,7 @@ const Assignment = require("../models/Assignment");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const User = require("../models/users");
 const ApiError = require("../error/ApiError");
+const Ratings = require("../models/ratings");
 
 // Helper function to format date 
 const formatDueDate = (date) => {
@@ -518,6 +519,78 @@ const getSubmissionsByAssignment = async (req, res, next) => {
     }
 };
 
+// ============== PERFORMANCE REVIEW ENDPOINT ==============
+
+// GET /students/:id/performance-review
+const getStudentPerformanceReview = async (req, res, next) => {
+    try {
+        const studentId = req.params.id;
+
+        // Get student details
+        const student = await User.findById(studentId);
+        if (!student) {
+            return next(ApiError.notFound("Student not found"));
+        }
+
+        // Normalize stack for matching
+        const normalizeStack = (stack) => stack?.toLowerCase().replace(/\s+/g, "");
+        const stacksToInclude = [student.stack, "General"];
+
+        // Get all assignments for student's stack and 'General'
+        const assignments = await Assignment.find({
+            stack: { $in: stacksToInclude }
+        }).sort({ week: -1 });
+
+        // Get all submissions for this student
+        const submissions = await AssignmentSubmission.find({ student: studentId });
+        const submissionsMap = new Map();
+        submissions.forEach(sub => submissionsMap.set(String(sub.assignment), sub));
+
+        // Get all ratings for this student
+        const ratings = await Ratings.find({ student: studentId });
+        // Find all week numbers (from assignments and ratings)
+        let allWeeks = [
+            ...assignments.map(a => a.week),
+            ...ratings.map(r => r.week)
+        ];
+        // Sort weeks descending and remove duplicates
+        const uniqueWeeks = Array.from(new Set(allWeeks)).sort((a, b) => b - a);
+        // Try to find the most recent week with a ratings entry
+        let currentWeekBreakdown = {};
+        for (const week of uniqueWeeks) {
+            const foundRating = ratings.find(r => r.week === week);
+            if (foundRating) {
+                currentWeekBreakdown = {
+                    punctuality: foundRating.punctuality,
+                    Assignments: foundRating.Assignments,
+                    personalDefense: foundRating.personalDefense,
+                    classParticipation: foundRating.classParticipation,
+                    classAssessment: foundRating.classAssessment,
+                    total: foundRating.total
+                };
+                break;
+            }
+        }
+
+        // Build assessments array (no ratings)
+        const assessments = assignments.map(assignment => {
+            const submission = submissionsMap.get(String(assignment._id));
+            const week = assignment.week;
+            return {
+                week,
+                assessmentTitle: assignment.title,
+                dueDate: assignment.dueDateTime,
+                score: submission ? submission.grade ?? null : null,
+                status: submission ? (submission.grade !== undefined && submission.grade !== null ? "Graded" : "Pending") : "Not Submitted"
+            };
+        });
+
+        res.status(200).json({ assessments, currentWeekBreakdown });
+    } catch (err) {
+        next(ApiError.badRequest(`${err}`));
+    }
+};
+
 module.exports = {
     // Assignment Management
     createAssignment,
@@ -537,4 +610,7 @@ module.exports = {
     gradeSubmission,
     getSubmissionsByWeek,
     getSubmissionsByAssignment
+    ,
+    // Performance Review
+    getStudentPerformanceReview
 };
