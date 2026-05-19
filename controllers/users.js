@@ -16,6 +16,7 @@ const fs = require("fs")
 const {validateStudent,validateLogin} = require("../middleware/validator.js")
 const AssignmentSubmission =require("../models/AssignmentSubmission.js")
 const Assignment = require("../models/Assignment.js")
+const Ratings = require("../models/ratings");
 
 const alumniModel = require("../models/Alumni");
 const tutorModel = require("../models/tutors");
@@ -464,10 +465,10 @@ const getOneUser = async (req, res, next)=>{
 
 const updateUser = async (req, res, next)=>{
     try{
-        const id = req.params.id;
+        const { id } = req.user;
         const userWho = await userModel.findById(id);
         let imageShow;
-        if(req.file.path){
+        if(req.file && req.file.path){
             await cloudinary.uploader.destroy(userWho.imageId);
             imageShow = await cloudinary.uploader.upload(req.file.path)
         }
@@ -476,7 +477,8 @@ const updateUser = async (req, res, next)=>{
             name: req.body.name || userWho.name,
             image: imageShow.secure_url || userWho.image,
             imageId: imageShow.public_id || userWho.imageId,
-            phone: req.body.phone || userWho.phone
+            phone: req.body.phone || userWho.phone,
+            bio: req.body.bio || userWho.bio,
         }, {new: true});
         res.status(200).json({data: user});
     }catch(err){
@@ -494,9 +496,18 @@ const secondUpdate = async(req,res,next)=>{
 
         const Data={
             name: req.body.name || checkUser.name,
-            password: req.body.password || checkUser.password,
-            email: req.body.email || checkUser.email,
-            phone: req.body.phone || checkUser.phone
+            // password: req.body.password || checkUser.password,
+            email: checkUser.email,
+            phone: req.body.phone || checkUser.phone,
+            bio: req.body.bio || checkUser.bio,
+        }
+        if (req.body.email) {
+            const emailExists = await userModel.findOne({email: req.body.email.toLowerCase()});
+            if (emailExists && emailExists._id.toString() !== id) {
+                return res.status(400).json({message: "Email already in use"});
+            } else {
+                Data.email = req.body.email.toLowerCase();
+            }
         }
 
         if(req.file){
@@ -709,28 +720,199 @@ const getSingleAlumni = async (req, res, next) => {
   }
 };
 
+const getProfile = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const user = await userModel.findById(userId).select("name email bio image role");
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    const profile = {
+      name: user.name,
+      email: user.email,
+      bio: user.bio,
+      image: user.image
+    };
+
+    // Only add stats if student
+    if (user.role === "student") {
+      // Get all ratings for the student
+      const ratings = await Ratings.find({ student: userId });
+      const averageScore = ratings.length > 0
+        ? (ratings.reduce((sum, r) => sum + (r.total || 0), 0) / ratings.length).toFixed(2)
+        : null;
+
+      // Get all submissions for the student
+      const submissions = await AssignmentSubmission.find({ student: userId });
+      // Completed assessments: graded assignments
+      const completedAssessments = submissions.filter(s => s.grade !== undefined && s.grade !== null).length;
+      // Pending assignments: submitted but not graded
+      const pendingAssignments = submissions.filter(s => s.grade === undefined || s.grade === null).length;
+
+      profile.stat = {
+        averageScore: averageScore ? Number(averageScore) : 0,
+        completedAssessments,
+        pendingAssignments
+      };
+    }
+
+    res.status(200).json({ profile });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Rankings and Top Assignment Scorers Endpoint
+const getRankingsAndTopAssignments = async (req, res, next) => {
+  try {
+
+    // Normalize stack query for flexible matching (case/space-insensitive)
+    let stackQuery = null;
+    if (req.query.stack) {
+      // Remove spaces and lowercase for matching
+      const normalized = req.query.stack.replace(/\s+/g, '').toLowerCase();
+      stackQuery = normalized;
+    }
+
+    // 1. Rankings (from Ratings)
+    // Get all students (fetch all, filter in-memory for robust normalization)
+    let students = await userModel.find({ role: "student" }).select("_id name stack");
+    if (stackQuery) {
+      students = students.filter(s => {
+        const normalizedStack = (s.stack || "").replace(/\s+/g, '').toLowerCase();
+        return normalizedStack === stackQuery;
+      });
+    }
+
+    // Get all ratings for these students
+    const studentIds = students.map(s => s._id);
+    const ratings = await Ratings.find({ student: { $in: studentIds } });
+
+    // Group ratings by student
+    const ratingsByStudent = {};
+    ratings.forEach(r => {
+      const sid = r.student.toString();
+      if (!ratingsByStudent[sid]) ratingsByStudent[sid] = [];
+      ratingsByStudent[sid].push(r);
+    });
+
+    // Calculate averages
+    const rankings = students.map(student => {
+      const sid = student._id.toString();
+      const studentRatings = ratingsByStudent[sid] || [];
+      const count = studentRatings.length;
+      // Use correct field names from ratings.js
+      const fields = ["punctuality", "Assignments", "personalDefense", "classParticipation", "classAssessment"];
+      const averages = {};
+      let overallSum = 0;
+      fields.forEach(field => {
+        const avg = count > 0 ? studentRatings.reduce((sum, r) => sum + (r[field] || 0), 0) / count : 0;
+        averages[field] = Number(avg.toFixed(2));
+        overallSum += avg;
+      });
+      const overallScore = count > 0 ? overallSum / fields.length : 0;
+      return {
+        studentName: student.name,
+        stack: student.stack,
+        overallScore: Number(overallScore.toFixed(2)),
+        punctuality: averages.punctuality,
+        Assignments: averages.Assignments,
+        personalDefence: averages.personalDefense, 
+        classParticipation: averages.classParticipation,
+        classAssessment: averages.classAssessment
+      };
+    });
+
+    // 2. Top Assignment Scorers (from AssignmentSubmission)
+    // Get all graded submissions, populate assignment and student
+    const submissionFilter = { status: "Graded" };
+    // No need to filter AssignmentSubmission by stack, since students are already filtered
+    const gradedSubs = await AssignmentSubmission.find({ status: "Graded", student: { $in: studentIds } })
+      .populate({ path: "assignment", select: "title" })
+      .populate({ path: "student", select: "name stack" });
+
+    // Group by assignment
+    const assignmentGroups = {};
+    gradedSubs.forEach(sub => {
+      const aid = sub.assignment?._id?.toString();
+      if (!aid) return;
+      if (!assignmentGroups[aid]) assignmentGroups[aid] = [];
+      assignmentGroups[aid].push(sub);
+    });
+
+    // For each assignment, find the highest scorer (randomize if tie)
+    const topAssignmentScorers = Object.values(assignmentGroups).map(subs => {
+      if (subs.length === 0) return null;
+      // Find max grade
+      const maxGrade = Math.max(...subs.map(s => s.grade || 0));
+      // Get all with max grade
+      const topSubs = subs.filter(s => (s.grade || 0) === maxGrade);
+      // Randomly pick one
+      const winner = topSubs[Math.floor(Math.random() * topSubs.length)];
+      return {
+        title: winner.assignment?.title || "Untitled",
+        name: winner.student?.name || "Unknown",
+        totalScore: winner.grade
+      };
+    }).filter(Boolean);
+
+    res.status(200).json({
+      rankings,
+      topAssignmentScorers
+    });
+  } catch (err) {
+    next(ApiError.badRequest(err.message));
+  }
+};
+
+const changePassword = async (req, res, next) => {
+  try {
+    const  userId  = req.user.id;
+    const { currentPassword, newPassword } = req.body; 
+    const user = await userModel.findById(userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      return res.status(400).json({ message: "Current password is incorrect" });
+    }
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+    user.password = hashedPassword;
+    await user.save();
+    res.status(200).json({ message: "Password changed successfully" });
+  } catch (err) {
+    next(ApiError.badRequest(err.message));
+  }
+}
+
 module.exports ={
-    createUser,
-    deleteUser,
-    getUser,
-    getOneUser,
-    updateUser,
-    secondUpdate,
-    getUsers,
-    loginUser,
-    makeAlumni,
-    makeStudent,
-    forgotPassword,
-    resetPassword,
-    updateAllUsersWeekStatus,
-    resetWeeklyAssessments,
-    allExistEmailsToLowerCase,
-    studentDashboard,
-    getDashboardStats,
-    getAllStaffs,
-getAllStudents,
-getAllAlumnis,
-getSingleStudent,
-getSingleStaff,
-getSingleAlumni,
+  getProfile,
+  createUser,
+  deleteUser,
+  getUser,
+  getOneUser,
+  updateUser,
+  secondUpdate,
+  getUsers,
+  loginUser,
+  makeAlumni,
+  makeStudent,
+  forgotPassword,
+  resetPassword,
+  updateAllUsersWeekStatus,
+  resetWeeklyAssessments,
+  allExistEmailsToLowerCase,
+  studentDashboard,
+  getDashboardStats,
+  getAllStaffs,
+  getAllStudents,
+  getAllAlumnis,
+  getSingleStudent,
+  getSingleStaff,
+  getSingleAlumni,
+  getRankingsAndTopAssignments,
+  changePassword
 }
