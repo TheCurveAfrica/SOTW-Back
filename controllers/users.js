@@ -465,22 +465,25 @@ const getOneUser = async (req, res, next)=>{
 
 const updateUser = async (req, res, next)=>{
     try{
-        const { id } = req.user;
-        const userWho = await userModel.findById(id);
-        let imageShow;
-        if(req.file && req.file.path){
-            await cloudinary.uploader.destroy(userWho.imageId);
-            imageShow = await cloudinary.uploader.upload(req.file.path)
+        const id = req.user.id;
+        const user = await userModel.findById(id);
+        if(!user){
+            return res.status(404).json('User not Found');
         }
-        // const imageShow = await cloudinary.uploader.upload(req.file.path)
-        const user = await userModel.findByIdAndUpdate(id, {
-            name: req.body.name || userWho.name,
-            image: imageShow.secure_url || userWho.image,
-            imageId: imageShow.public_id || userWho.imageId,
-            phone: req.body.phone || userWho.phone,
-            bio: req.body.bio || userWho.bio,
-        }, {new: true});
-        res.status(200).json({data: user});
+        if(req.file){
+           if(user.imageId){
+                await cloudinary.uploader.destroy(user.imageId);
+            }
+            const result = await cloudinary.uploader.upload(req.file.path);
+            user.image = result.secure_url;
+            user.imageId = result.public_id;
+        }
+        user.name = req.body.name || user.name;
+        user.email = req.body.email || user.email;
+        user.phone = req.body.phone || user.phone;
+        user.bio = req.body.bio || user.bio;
+        await user.save();
+        res.status(200).json({data: user})
     }catch(err){
         next(ApiError.badRequest(`${err}`))
     }
