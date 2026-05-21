@@ -191,7 +191,7 @@ const studentDashboard = async (req, res, next) => {
 
     const submissions = await AssignmentSubmission.find({
       student: studentId,
-    }).populate("Assignment");
+    }).populate("assignment");
 
     const assignments = await Assignment.find({
       stack: student.stack,
@@ -566,32 +566,7 @@ const makeStudent = async(req, res, next)=>{
 }
 
 
-// const getDashboardStatchgecks = async () => {
-//   try {
-//     const students =  await  userModel.find({role: "student"}).countDocuments()
-//      const staffs = await userModel.find({role: "tutor"}).countDocuments()
-//       const alumnis = await userModel.countDocuments()
-    
-//    const allStudents = await userModel
-//       .findOne({email:""})
-//       .select("-password")
-//       .sort({ createdAt: -1 });
-
-// console.log("hi", allStudents)
-
-
-//     console.log({
-//       students,
-//       staffs,
-//       alumnis,
-//     })
-//   }
-//     catch (error) {
-//       throw error;
-//     } 
-// };
-   
-// getDashboardStatchgecks();
+//      
 
 const getDashboardStats = async (req, res, next) => {
   try {
