@@ -437,7 +437,7 @@ const deleteUser = async(req, res, next)=>{
         const Id = req.params.id;
         const user = await userModel.findById(Id);
         await cloudinary.uploader.destroy(user.imageId);
-        await user.remove()
+        await userModel.findByIdAndDelete(Id);
         res.status(200).json({msg: 'deleted'})
     }catch(err){
         next(ApiError.badRequest(`${err}`))
