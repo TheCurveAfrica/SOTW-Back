@@ -165,7 +165,8 @@ if (error) {
                 const userInfo = {
                     name:user.name,
                     stack:user.stack,
-                    id:user._id
+                    id:user._id,
+                    role: user.role
 
                 }
                 res.status(200).json({message:"logged in", data: { token,stack: user.stack,hub:user.hub,userInfo}})
