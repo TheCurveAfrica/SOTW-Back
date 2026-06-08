@@ -1,6 +1,108 @@
 const ratingsModel = require("../models/ratings");
 const userDb = require("../models/users");
 const ApiError = require("../error/ApiError");
+const xlsx = require("xlsx");
+const fs = require("fs");
+
+// BULK UPLOAD RATINGS FROM EXCEL (TALL FORMAT — one row per student per week)
+// Required columns : email, week, Assignments, personalDefense, classAssessment
+// Optional columns : classParticipation (attendance, defaults to 20), punctuality (defaults to 20)
+// Only existing users are processed. Rows for non-existent users or already-rated weeks are skipped.
+const uploadRatingsExcel = async (req, res, next) => {
+  const filePath = req.file?.path;
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
+
+    const workbook = xlsx.readFile(filePath);
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = xlsx.utils.sheet_to_json(sheet);
+
+    if (!rows.length) {
+      return res.status(400).json({ message: "The uploaded file is empty" });
+    }
+
+    const results = [];
+
+    for (const row of rows) {
+      const email = row.email?.toString().trim().toLowerCase();
+      const week = Number(row.week);
+
+      // Validate required row fields
+      if (!email || !week || isNaN(week)) {
+        results.push({ email: email || null, week: row.week, status: "skipped", reason: "Missing email or week" });
+        continue;
+      }
+
+      const Assignments = Number(row.Assignments);
+      const personalDefense = Number(row.personalDefense);
+      const classAssessment = Number(row.classAssessment);
+      const classParticipation = (row.classParticipation !== undefined && row.classParticipation !== "") ? Number(row.classParticipation) : 20;
+      const punctuality = (row.punctuality !== undefined && row.punctuality !== "") ? Number(row.punctuality) : 20;
+
+      if (isNaN(Assignments) || isNaN(personalDefense) || isNaN(classAssessment)) {
+        results.push({ email, week, status: "skipped", reason: "Missing or invalid required score fields (Assignments, personalDefense, classAssessment)" });
+        continue;
+      }
+
+      // Find user by email
+      const user = await userDb.findOne({ email });
+      if (!user) {
+        results.push({ email, week, status: "skipped", reason: "User not found" });
+        continue;
+      }
+
+      // Skip if rating already exists for this student/week
+      const existing = await ratingsModel.findOne({ student: user._id, week });
+      if (existing) {
+        results.push({ email, week, status: "skipped", reason: "Rating already exists for this week" });
+        continue;
+      }
+
+      // Calculate total (consistent with addRatings)
+      const total = (punctuality + Assignments + personalDefense + classParticipation + classAssessment) / 5;
+
+      const rating = new ratingsModel({
+        punctuality,
+        Assignments,
+        personalDefense,
+        classParticipation,
+        classAssessment,
+        total,
+        student: user._id,
+        week,
+      });
+      await rating.save();
+
+      user.allRatings.push(rating._id);
+
+      // Recalculate overallRating and weeklyRating from all saved ratings
+      const allRatings = await ratingsModel.find({ student: user._id });
+      const totals = allRatings.map((r) => r.total);
+      user.overallRating = totals.reduce((a, b) => a + b, 0) / totals.length;
+
+      const highestWeek = Math.max(...allRatings.map((r) => r.week));
+      const latestRating = allRatings.find((r) => r.week === highestWeek);
+      user.weeklyRating = latestRating ? Math.round(latestRating.total * 10) / 10 : 0;
+
+      user.assessedForTheWeek = true;
+      user.week = String(week);
+      await user.save();
+
+      results.push({ email, week, status: "success" });
+    }
+
+    res.status(200).json({ message: "Upload complete", results });
+  } catch (err) {
+    next(ApiError.badRequest(`${err}`));
+  } finally {
+    // Always clean up the uploaded file from disk
+    if (filePath && fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  }
+};
 
 
 
@@ -444,5 +546,6 @@ module.exports = {
   getRatings,
   deleteRatingss,
   updateRating,
-  addRatings
+  addRatings,
+  uploadRatingsExcel
 };

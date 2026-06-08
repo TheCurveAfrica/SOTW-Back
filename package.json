@@ -48,7 +48,8 @@
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",
     "uuid": "^13.0.0",
-    "validator": "^13.15.26"
+    "validator": "^13.15.26",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "npm-check-updates": "^19.6.3"
