@@ -297,10 +297,10 @@ const forgotPassword= async(req, res, next) => {
                           <p>We received a request to reset your password. If you did not make this request, please ignore this email.</p>
                           <p>To reset your password, click the link below:</p>
                           <p style="text-align: center;">
-                            <a href="https://thecurve-app.web.app/reset/${encryptedString}" style="background-color: #FFB703; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Reset Password</a>
+                            <a href="https://new-student-app.vercel.app/reset/${encryptedString}" style="background-color: #FFB703; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block;">Reset Password</a>
                           </p>
                           <p>If the button above doesn't work, you can copy and paste the following link into your browser:</p>
-                          <p style="text-align: center;">https://thecurve-app.web.app/reset/${encryptedString}</p>
+                          <p style="text-align: center;">https://new-student-app.vercel.app/reset/${encryptedString}</p>
                           <p style="text-align: center;">Use this token: <b>${tokenValue}</b></p>
                           <p style="margin-top: 30px;">Thanks,<br>THE CURVE AFRICA</p>
                         </td>
