@@ -13,7 +13,7 @@ const bodyParser = require('body-parser');
 const app = express();
 app.use(cors({
   credentials: true,
-  origin: ['http://localhost:3000', '*'], 
+  origin: ['http://localhost:3000', 'https://the-curve.africa', 'http://localhost:5173', '*'], 
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], 
   allowedHeaders: ['Content-Type', 'Authorization'], 
 }))
@@ -100,6 +100,8 @@ app.use("/algo", require("./routes/SOTWAlgorithm"))
 
 //assignment management routes (consolidated)
 app.use("/api", require("./routes/assignmentManagement"));
+
+app.use("/api", require("./routes/registration"));
 
 //error middleware
 app.use(apiErrorHandler);

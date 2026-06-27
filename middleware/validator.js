@@ -149,10 +149,121 @@ const validateLogin = (data) => {
 
   return schema.validate(data); 
 }
+
+const validateRegistration = (data) => {
+  const schema = joi.object({
+    learningMode: joi
+      .string()
+      .valid("physical", "virtual")
+      .required()
+      .messages({
+        "any.only": 'learningMode must be "physical" or "virtual"',
+        "string.empty": "Learning mode is required",
+      }),
+
+    firstName: joi
+      .string()
+      .trim()
+      .min(2)
+      .required()
+      .messages({
+        "string.empty": "First name is required",
+        "string.min": "First name must be at least 2 characters",
+      }),
+
+    lastName: joi
+      .string()
+      .trim()
+      .min(2)
+      .required()
+      .messages({
+        "string.empty": "Last name is required",
+        "string.min": "Last name must be at least 2 characters",
+      }),
+
+    email: joi
+      .string()
+      .trim()
+      .email()
+      .lowercase()
+      .required()
+      .messages({
+        "string.email": "Invalid email format",
+        "string.empty": "Email is required",
+      }),
+
+    phone: joi
+      .string()
+      .pattern(/^[0-9]{10,15}$/)
+      .required()
+      .messages({
+        "string.pattern.base": "Phone must be between 10–15 digits",
+        "string.empty": "Phone is required",
+      }),
+
+    gender: joi.string().trim().min(1).required().messages({
+      "string.empty": "Gender is required",
+    }),
+
+    age: joi.string().trim().min(1).required().messages({
+      "string.empty": "Age is required",
+    }),
+
+    address: joi.string().trim().min(1).required().messages({
+      "string.empty": "Address is required",
+    }),
+
+    occupation: joi.string().trim().min(1).required().messages({
+      "string.empty": "Occupation is required",
+    }),
+
+    education: joi.string().trim().min(1).required().messages({
+      "string.empty": "Education is required",
+    }),
+
+    ownLaptop: joi
+      .string()
+      .trim()
+      .when("learningMode", {
+        is: "physical",
+        then: joi.string().trim().min(1).required().messages({
+          "string.empty": "Own laptop is required for physical learning",
+        }),
+        otherwise: joi.string().trim().allow("").optional(),
+      }),
+
+    stack: joi.string().trim().min(1).required().messages({
+      "string.empty": "Stack is required",
+    }),
+
+    whyStack: joi.string().trim().min(1).required().messages({
+      "string.empty": "Why stack is required",
+    }),
+
+    whyConsider: joi
+      .string()
+      .trim()
+      .when("learningMode", {
+        is: "physical",
+        then: joi.string().trim().min(1).required().messages({
+          "string.empty": "Why consider is required for physical learning",
+        }),
+        otherwise: joi.string().trim().allow("").optional(),
+      }),
+
+    hearAbout: joi.string().trim().min(1).required().messages({
+      "string.empty": "Hear about is required",
+    }),
+  });
+
+  return schema.validate(data);
+};
+
 module.exports = {
     validateUser,
     validateUserLogin,
     validateUserLocation,
     validateStudent,
-    validateLogin
+    validateLogin,
+    validateRegistration,
 }
