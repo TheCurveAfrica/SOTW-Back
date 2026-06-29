@@ -37,7 +37,9 @@ const register = async (req, res, next) => {
 
     if (registration) {
       if (registration.sheetSynced) {
-        return res.status(201).json({ success: true });
+        return next(
+          ApiError.conflict("You have already registered with this email.")
+        );
       }
     } else {
       registration = await Registration.create(data);

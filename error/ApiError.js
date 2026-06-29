@@ -20,6 +20,10 @@ class ApiError {
         return new ApiError(404, msg);
     }
 
+    static conflict(msg){
+        return new ApiError(409, msg);
+    }
+
     static internal(msg){
         return new ApiError(500, msg)
     }
