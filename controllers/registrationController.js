@@ -12,6 +12,7 @@ const REGISTRATION_FIELDS = [
   "gender",
   "age",
   "address",
+  "country",
   "occupation",
   "education",
   "ownLaptop",

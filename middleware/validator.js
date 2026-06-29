@@ -213,6 +213,17 @@ const validateRegistration = (data) => {
       "string.empty": "Address is required",
     }),
 
+    country: joi
+      .string()
+      .trim()
+      .when("learningMode", {
+        is: "virtual",
+        then: joi.string().trim().min(1).required().messages({
+          "string.empty": "Country is required for virtual learning",
+        }),
+        otherwise: joi.string().trim().allow("").optional(),
+      }),
+
     occupation: joi.string().trim().min(1).required().messages({
       "string.empty": "Occupation is required",
     }),
@@ -236,9 +247,16 @@ const validateRegistration = (data) => {
       "string.empty": "Stack is required",
     }),
 
-    whyStack: joi.string().trim().min(1).required().messages({
-      "string.empty": "Why stack is required",
-    }),
+    whyStack: joi
+      .string()
+      .trim()
+      .when("learningMode", {
+        is: "physical",
+        then: joi.string().trim().min(1).required().messages({
+          "string.empty": "Why stack is required for physical learning",
+        }),
+        otherwise: joi.string().trim().allow("").optional(),
+      }),
 
     whyConsider: joi
       .string()

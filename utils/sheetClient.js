@@ -45,7 +45,7 @@ async function getSheetForMode(learningMode) {
 
 async function appendRegistrationRow(payload) {
   const sheet = await getSheetForMode(payload.learningMode);
-  await sheet.addRow({
+  const row = {
     Timestamp: new Date().toISOString(),
     "First Name": payload.firstName,
     "Last Name": payload.lastName,
@@ -58,10 +58,16 @@ async function appendRegistrationRow(payload) {
     Education: payload.education,
     "Own Laptop": payload.ownLaptop || "",
     Stack: payload.stack,
-    "Why Stack": payload.whyStack,
+    "Why Stack": payload.whyStack || "",
     "Why Consider": payload.whyConsider || "",
     "Hear About": payload.hearAbout,
-  });
+  };
+
+  if (payload.learningMode === "virtual") {
+    row.Country = payload.country;
+  }
+
+  await sheet.addRow(row);
 }
 
 module.exports = { getSheetForMode, appendRegistrationRow };
