@@ -2,6 +2,10 @@ const Registration = require("../models/Registration");
 const ApiError = require("../error/ApiError");
 const { validateRegistration } = require("../middleware/validator");
 const { appendRegistrationRow } = require("../utils/sheetClient");
+const sendMail = require("../utils/email");
+const {
+  generateRegistrationConfirmationEmail,
+} = require("../utils/registrationEmail");
 
 const REGISTRATION_FIELDS = [
   "learningMode",
@@ -56,6 +60,20 @@ const register = async (req, res, next) => {
 
     registration.sheetSynced = true;
     await registration.save();
+
+    const html = generateRegistrationConfirmationEmail(data.firstName);
+    const mailResult = await sendMail({
+      email: data.email,
+      subject: "Registration Successful",
+      html,
+    });
+
+    if (!mailResult.success) {
+      console.error(
+        "Registration confirmation email failed:",
+        mailResult.message
+      );
+    }
 
     res.status(201).json({ success: true });
   } catch (err) {
