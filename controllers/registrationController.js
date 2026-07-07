@@ -61,19 +61,19 @@ const register = async (req, res, next) => {
     registration.sheetSynced = true;
     await registration.save();
 
-    const html = generateRegistrationConfirmationEmail(data.firstName);
-    const mailResult = await sendMail({
-      email: data.email,
-      subject: "Registration Successful",
-      html,
-    });
+    // const html = generateRegistrationConfirmationEmail(data.firstName);
+    // const mailResult = await sendMail({
+    //   email: data.email,
+    //   subject: "Registration Successful",
+    //   html,
+    // });
 
-    if (!mailResult.success) {
-      console.error(
-        "Registration confirmation email failed:",
-        mailResult.message
-      );
-    }
+    // if (!mailResult.success) {
+    //   console.error(
+    //     "Registration confirmation email failed:",
+    //     mailResult.message
+    //   );
+    // }
 
     res.status(201).json({ success: true });
   } catch (err) {
