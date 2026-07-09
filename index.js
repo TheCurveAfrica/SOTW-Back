@@ -13,9 +13,14 @@ const bodyParser = require('body-parser');
 const app = express();
 app.use(cors({
   credentials: true,
-  origin: ['http://localhost:3000', 'https://the-curve.africa', 'http://localhost:5173', '*'], 
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'], 
-  allowedHeaders: ['Content-Type', 'Authorization'], 
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'https://the-curve.africa',
+    'https://www.the-curve.africa',
+  ],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 app.use(express.json());
 
