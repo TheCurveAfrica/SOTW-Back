@@ -3,6 +3,21 @@ const AssignmentSubmission = require("../models/AssignmentSubmission");
 const User = require("../models/users");
 const ApiError = require("../error/ApiError");
 const Ratings = require("../models/ratings");
+const { sanitizeTaskDescription, htmlToPlainText } = require("../utils/sanitizeTaskDescription");
+const { getProgramSettings, getWeekStart } = require("../utils/programWeek");
+
+// Rich-text descriptions arrive as HTML and must be sanitized before they are stored;
+// plain-text ones are kept verbatim. Returns null when the description carries no real text.
+const prepareDescription = (taskDescription, descriptionFormat) => {
+    if (descriptionFormat !== "html") {
+        return { taskDescription, descriptionFormat: "text" };
+    }
+
+    const clean = sanitizeTaskDescription(taskDescription);
+    if (!htmlToPlainText(clean)) return null;
+
+    return { taskDescription: clean, descriptionFormat: "html" };
+};
 
 // Helper function to format date 
 const formatDueDate = (date) => {
@@ -32,10 +47,21 @@ const formatDueDate = (date) => {
 // Create Assignment
 const createAssignment = async (req, res, next) => {
     try {
-        const { week, title, taskDescription, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { week, title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
 
         if (!week || week < 1 || !title || !taskDescription || !stack || !dueDate || !dueTime) {
             return next(ApiError.badRequest("Missing required fields"));
+        }
+
+        const settings = await getProgramSettings();
+        const weekNumber = Number(week);
+        if (weekNumber > settings.totalWeeks) {
+            return next(ApiError.badRequest(`Week must be between 1 and ${settings.totalWeeks}`));
+        }
+
+        const description = prepareDescription(taskDescription, descriptionFormat);
+        if (!description) {
+            return next(ApiError.badRequest("Task description cannot be empty"));
         }
 
 
@@ -44,21 +70,10 @@ const createAssignment = async (req, res, next) => {
         const [hours, minutes] = dueTime.split(':');
         const dueDateTime = new Date(year, month - 1, day, hours, minutes);
 
-        // Calculate the start of the requested week (Monday 00:00)
-        const now = new Date();
-        // Get current day of week (0=Sunday, 1=Monday, ... 6=Saturday)
-        const currentDay = now.getDay();
-        // Calculate how many days to subtract to get to Monday
-        const daysSinceMonday = (currentDay + 6) % 7;
-        // Get the Monday of the current week
-        const mondayThisWeek = new Date(now);
-        mondayThisWeek.setHours(0, 0, 0, 0);
-        mondayThisWeek.setDate(now.getDate() - daysSinceMonday);
-
-        // Calculate the Monday for the requested week
-        const weekNumber = Number(week);
-        const mondayOfRequestedWeek = new Date(mondayThisWeek);
-        mondayOfRequestedWeek.setDate(mondayThisWeek.getDate() + 7 * (weekNumber - 1));
+        // Monday 00:00 of the requested program week, anchored to the configured
+        // cohort start date. Without a start date this falls back to the current
+        // calendar week, matching the behaviour before program settings existed.
+        const mondayOfRequestedWeek = getWeekStart(settings, weekNumber);
 
         // Calculate the cutoff: 12:00 am Monday of the next week
         const mondayNextWeek = new Date(mondayOfRequestedWeek);
@@ -73,7 +88,8 @@ const createAssignment = async (req, res, next) => {
         const assignment = new Assignment({
             week,
             title,
-            taskDescription,
+            taskDescription: description.taskDescription,
+            descriptionFormat: description.descriptionFormat,
             stack,
             dueDateTime,
             allowLateSubmissions
@@ -167,13 +183,20 @@ const getAllAssignments = async (req, res, next) => {
 const updateAssignment = async (req, res, next) => {
     try {
         const { assignmentId } = req.params;
-        const { title, taskDescription, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
 
         // Build update object with only provided fields
         const updateFields = {};
 
         if (title !== undefined) updateFields.title = title;
-        if (taskDescription !== undefined) updateFields.taskDescription = taskDescription;
+        if (taskDescription !== undefined) {
+            const description = prepareDescription(taskDescription, descriptionFormat);
+            if (!description) {
+                return next(ApiError.badRequest("Task description cannot be empty"));
+            }
+            updateFields.taskDescription = description.taskDescription;
+            updateFields.descriptionFormat = description.descriptionFormat;
+        }
         if (stack !== undefined) updateFields.stack = stack;
         if (allowLateSubmissions !== undefined) updateFields.allowLateSubmissions = allowLateSubmissions;
 
@@ -219,10 +242,12 @@ const updateAssignment = async (req, res, next) => {
             return next(ApiError.badRequest("No valid fields provided for update"));
         }
 
+        // runValidators keeps the stack and descriptionFormat enums enforced on update,
+        // not just on create.
         const assignment = await Assignment.findByIdAndUpdate(
             assignmentId,
             updateFields,
-            { new: true }
+            { new: true, runValidators: true }
         );
 
         if (!assignment) {
@@ -510,7 +535,7 @@ const getSubmissionsByAssignment = async (req, res, next) => {
 
         const submissions = await AssignmentSubmission.find({ assignment: assignmentId })
             .populate('student', 'name image stack')
-            .populate('assignment', 'title week stack taskDescription')
+            .populate('assignment', 'title week stack taskDescription descriptionFormat')
             .sort({ submittedAt: -1 });
 
         res.status(200).json({ submissions });

@@ -44,6 +44,7 @@
     "multer": "^2.1.1",
     "node-deep-email-validator": "^0.0.2",
     "nodemailer": "^8.0.1",
+    "sanitize-html": "^2.17.7",
     "sharp": "^0.34.5",
     "socket.io": "^4.8.3",
     "stripe": "^20.4.0",
