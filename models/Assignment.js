@@ -14,6 +14,13 @@ const assignmentSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    // "text" for legacy plain-text descriptions, "html" for rich-text ones.
+    // Defaults to "text" so existing assignments stay correct without a migration.
+    descriptionFormat: {
+        type: String,
+        enum: ["text", "html"],
+        default: "text"
+    },
     stack: {
         type: String,
         required: true,

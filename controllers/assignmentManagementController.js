@@ -3,6 +3,20 @@ const AssignmentSubmission = require("../models/AssignmentSubmission");
 const User = require("../models/users");
 const ApiError = require("../error/ApiError");
 const Ratings = require("../models/ratings");
+const { sanitizeTaskDescription, htmlToPlainText } = require("../utils/sanitizeTaskDescription");
+
+// Rich-text descriptions arrive as HTML and must be sanitized before they are stored;
+// plain-text ones are kept verbatim. Returns null when the description carries no real text.
+const prepareDescription = (taskDescription, descriptionFormat) => {
+    if (descriptionFormat !== "html") {
+        return { taskDescription, descriptionFormat: "text" };
+    }
+
+    const clean = sanitizeTaskDescription(taskDescription);
+    if (!htmlToPlainText(clean)) return null;
+
+    return { taskDescription: clean, descriptionFormat: "html" };
+};
 
 // Helper function to format date 
 const formatDueDate = (date) => {
@@ -32,10 +46,15 @@ const formatDueDate = (date) => {
 // Create Assignment
 const createAssignment = async (req, res, next) => {
     try {
-        const { week, title, taskDescription, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { week, title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
 
         if (!week || week < 1 || !title || !taskDescription || !stack || !dueDate || !dueTime) {
             return next(ApiError.badRequest("Missing required fields"));
+        }
+
+        const description = prepareDescription(taskDescription, descriptionFormat);
+        if (!description) {
+            return next(ApiError.badRequest("Task description cannot be empty"));
         }
 
 
@@ -73,7 +92,8 @@ const createAssignment = async (req, res, next) => {
         const assignment = new Assignment({
             week,
             title,
-            taskDescription,
+            taskDescription: description.taskDescription,
+            descriptionFormat: description.descriptionFormat,
             stack,
             dueDateTime,
             allowLateSubmissions
@@ -167,13 +187,20 @@ const getAllAssignments = async (req, res, next) => {
 const updateAssignment = async (req, res, next) => {
     try {
         const { assignmentId } = req.params;
-        const { title, taskDescription, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
 
         // Build update object with only provided fields
         const updateFields = {};
 
         if (title !== undefined) updateFields.title = title;
-        if (taskDescription !== undefined) updateFields.taskDescription = taskDescription;
+        if (taskDescription !== undefined) {
+            const description = prepareDescription(taskDescription, descriptionFormat);
+            if (!description) {
+                return next(ApiError.badRequest("Task description cannot be empty"));
+            }
+            updateFields.taskDescription = description.taskDescription;
+            updateFields.descriptionFormat = description.descriptionFormat;
+        }
         if (stack !== undefined) updateFields.stack = stack;
         if (allowLateSubmissions !== undefined) updateFields.allowLateSubmissions = allowLateSubmissions;
 
@@ -219,10 +246,12 @@ const updateAssignment = async (req, res, next) => {
             return next(ApiError.badRequest("No valid fields provided for update"));
         }
 
+        // runValidators keeps the stack and descriptionFormat enums enforced on update,
+        // not just on create.
         const assignment = await Assignment.findByIdAndUpdate(
             assignmentId,
             updateFields,
-            { new: true }
+            { new: true, runValidators: true }
         );
 
         if (!assignment) {
@@ -510,7 +539,7 @@ const getSubmissionsByAssignment = async (req, res, next) => {
 
         const submissions = await AssignmentSubmission.find({ assignment: assignmentId })
             .populate('student', 'name image stack')
-            .populate('assignment', 'title week stack taskDescription')
+            .populate('assignment', 'title week stack taskDescription descriptionFormat')
             .sort({ submittedAt: -1 });
 
         res.status(200).json({ submissions });
