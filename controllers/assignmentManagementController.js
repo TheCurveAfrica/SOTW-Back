@@ -4,6 +4,7 @@ const User = require("../models/users");
 const ApiError = require("../error/ApiError");
 const Ratings = require("../models/ratings");
 const { sanitizeTaskDescription, htmlToPlainText } = require("../utils/sanitizeTaskDescription");
+const { getProgramSettings, getWeekStart } = require("../utils/programWeek");
 
 // Rich-text descriptions arrive as HTML and must be sanitized before they are stored;
 // plain-text ones are kept verbatim. Returns null when the description carries no real text.
@@ -52,6 +53,12 @@ const createAssignment = async (req, res, next) => {
             return next(ApiError.badRequest("Missing required fields"));
         }
 
+        const settings = await getProgramSettings();
+        const weekNumber = Number(week);
+        if (weekNumber > settings.totalWeeks) {
+            return next(ApiError.badRequest(`Week must be between 1 and ${settings.totalWeeks}`));
+        }
+
         const description = prepareDescription(taskDescription, descriptionFormat);
         if (!description) {
             return next(ApiError.badRequest("Task description cannot be empty"));
@@ -63,21 +70,10 @@ const createAssignment = async (req, res, next) => {
         const [hours, minutes] = dueTime.split(':');
         const dueDateTime = new Date(year, month - 1, day, hours, minutes);
 
-        // Calculate the start of the requested week (Monday 00:00)
-        const now = new Date();
-        // Get current day of week (0=Sunday, 1=Monday, ... 6=Saturday)
-        const currentDay = now.getDay();
-        // Calculate how many days to subtract to get to Monday
-        const daysSinceMonday = (currentDay + 6) % 7;
-        // Get the Monday of the current week
-        const mondayThisWeek = new Date(now);
-        mondayThisWeek.setHours(0, 0, 0, 0);
-        mondayThisWeek.setDate(now.getDate() - daysSinceMonday);
-
-        // Calculate the Monday for the requested week
-        const weekNumber = Number(week);
-        const mondayOfRequestedWeek = new Date(mondayThisWeek);
-        mondayOfRequestedWeek.setDate(mondayThisWeek.getDate() + 7 * (weekNumber - 1));
+        // Monday 00:00 of the requested program week, anchored to the configured
+        // cohort start date. Without a start date this falls back to the current
+        // calendar week, matching the behaviour before program settings existed.
+        const mondayOfRequestedWeek = getWeekStart(settings, weekNumber);
 
         // Calculate the cutoff: 12:00 am Monday of the next week
         const mondayNextWeek = new Date(mondayOfRequestedWeek);

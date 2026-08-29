@@ -108,5 +108,8 @@ app.use("/api", require("./routes/assignmentManagement"));
 
 app.use("/api", require("./routes/registration"));
 
+//program settings routes (current week, cohort start date, program length)
+app.use("/api", require("./routes/programSettings"));
+
 //error middleware
 app.use(apiErrorHandler);
