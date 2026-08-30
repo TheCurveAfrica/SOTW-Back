@@ -21,7 +21,10 @@ const {
     getStudentSubmissionsByTutor,
 
     // Performance Review
-    getStudentPerformanceReview
+    getStudentPerformanceReview,
+
+    // Weekly Assignment Scores
+    getStudentAssignmentScores
 } = require("../controllers/assignmentManagementController");
 // NOTE: authorizedTutor calls authenticate internally, so it replaces it rather
 // than being chained after it.
@@ -76,5 +79,9 @@ router.get("/grading/assignment/:assignmentId", authorizedTutor, getSubmissionsB
 // ============== PERFORMANCE REVIEW ROUTE ==============
 // Get a student's performance review (tutors/admins/students)
 router.get("/students/:id/performance-review", authenticate, getStudentPerformanceReview);
+
+// Get a student's cumulative assignment score out of 20 per week
+// (tutors/admins/students), optionally narrowed with ?week=N
+router.get("/students/:id/assignment-scores", authenticate, getStudentAssignmentScores);
 
 module.exports = router;

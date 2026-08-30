@@ -6,6 +6,11 @@ const Ratings = require("../models/ratings");
 const { sanitizeTaskDescription, htmlToPlainText } = require("../utils/sanitizeTaskDescription");
 const { getProgramSettings, getWeekStart } = require("../utils/programWeek");
 
+// Every assignment is graded on the same 0-20 scale, enforced by
+// AssignmentSubmission.grade (min: 0, max: 20). There is no per-assignment
+// maxScore field, so this is the single source of truth for the ceiling.
+const MAX_ASSIGNMENT_SCORE = 20;
+
 // Rich-text descriptions arrive as HTML and must be sanitized before they are stored;
 // plain-text ones are kept verbatim. Returns null when the description carries no real text.
 const prepareDescription = (taskDescription, descriptionFormat) => {
@@ -443,9 +448,12 @@ const gradeSubmission = async (req, res, next) => {
         const { submissionId } = req.params;
         const { grade, feedback } = req.body;
 
-        // Validate grade
-        if ( !grade || grade < 0 || grade > 20) {
-            return next(ApiError.badRequest("Grade must be between 0 and 20"));
+        // Validate grade. Coerced explicitly so a numeric string is range-checked
+        // as a number, and tested with Number.isFinite so a legitimate 0 is stored
+        // rather than rejected as falsy.
+        const numericGrade = Number(grade);
+        if (!Number.isFinite(numericGrade) || numericGrade < 0 || numericGrade > MAX_ASSIGNMENT_SCORE) {
+            return next(ApiError.badRequest(`Grade must be between 0 and ${MAX_ASSIGNMENT_SCORE}`));
         }
 
         // Verify submission exists
@@ -454,14 +462,18 @@ const gradeSubmission = async (req, res, next) => {
             return next(ApiError.notFound("Submission not found"));
         }
 
+        // Captured before the assignment below, otherwise the message always
+        // reads "updated"
+        const wasGraded = submission.grade !== undefined && submission.grade !== null;
+
         // Update submission with grade and feedback
-        submission.grade = grade;
+        submission.grade = numericGrade;
         submission.feedback = feedback;
         submission.status = "Graded";
         await submission.save();
 
         res.status(200).json({
-            message: submission.grade !== undefined && submission.grade !== null ? "Grade updated successfully" : "Assignment graded successfully",
+            message: wasGraded ? "Grade updated successfully" : "Assignment graded successfully",
             grade: submission.grade,
             feedback: submission.feedback
         });
@@ -616,6 +628,115 @@ const getStudentPerformanceReview = async (req, res, next) => {
     }
 };
 
+// ============== WEEKLY ASSIGNMENT SCORES ==============
+
+// GET /students/:id/assignment-scores?week=N
+// Aggregates a student's assignment grades into one cumulative score out of 20
+// per week. An assignment that was never submitted, or that has been submitted
+// but not yet graded, counts as 0 — the denominator is every assignment issued
+// to the student's stack that week, so the score reflects completion as well as
+// quality. Omit ?week to get every week.
+const getStudentAssignmentScores = async (req, res, next) => {
+    try {
+        const studentId = req.params.id;
+
+        const student = await User.findById(studentId);
+        if (!student) {
+            return next(ApiError.notFound("Student not found"));
+        }
+
+        // Match getStudentPerformanceReview: a student's workload is their own
+        // stack plus anything issued to "General".
+        const query = { stack: { $in: [student.stack, "General"] } };
+
+        let requestedWeek = null;
+        if (req.query.week !== undefined && req.query.week !== "") {
+            requestedWeek = Number(req.query.week);
+            if (!Number.isInteger(requestedWeek) || requestedWeek < 1) {
+                return next(ApiError.badRequest("week must be a positive integer"));
+            }
+            query.week = requestedWeek;
+        }
+
+        const assignments = await Assignment.find(query).sort({ week: -1, dueDateTime: 1 });
+
+        const submissions = await AssignmentSubmission.find({
+            student: studentId,
+            assignment: { $in: assignments.map((assignment) => assignment._id) }
+        });
+        const submissionsMap = new Map();
+        submissions.forEach((submission) => submissionsMap.set(String(submission.assignment), submission));
+
+        // Bucket the assignments by week, keeping the sort order established above.
+        const weekMap = new Map();
+        assignments.forEach((assignment) => {
+            const submission = submissionsMap.get(String(assignment._id));
+            const isGraded = !!submission && submission.grade !== undefined && submission.grade !== null;
+
+            if (!weekMap.has(assignment.week)) {
+                weekMap.set(assignment.week, []);
+            }
+
+            weekMap.get(assignment.week).push({
+                assignmentId: assignment._id,
+                title: assignment.title,
+                stack: assignment.stack,
+                dueDateTime: assignment.dueDateTime,
+                formattedDueDate: formatDueDate(assignment.dueDateTime),
+                submissionId: submission ? submission._id : null,
+                submissionLink: submission ? submission.submissionLink : null,
+                submittedAt: submission ? submission.submittedAt : null,
+                isLate: submission ? submission.isLate : false,
+                grade: isGraded ? submission.grade : null,
+                status: !submission ? "Not Submitted" : isGraded ? "Graded" : "Pending"
+            });
+        });
+
+        // A week that was explicitly requested but has no assignments still needs
+        // an entry, so the caller can render "no tasks issued" rather than nothing.
+        if (requestedWeek !== null && !weekMap.has(requestedWeek)) {
+            weekMap.set(requestedWeek, []);
+        }
+
+        const weeks = Array.from(weekMap.entries())
+            .sort((a, b) => b[0] - a[0])
+            .map(([week, items]) => {
+                const pointsEarned = items.reduce(
+                    (sum, item) => sum + (item.grade === null ? 0 : item.grade),
+                    0
+                );
+                const pointsPossible = items.length * MAX_ASSIGNMENT_SCORE;
+
+                return {
+                    week,
+                    maxScore: MAX_ASSIGNMENT_SCORE,
+                    totalAssignments: items.length,
+                    submittedCount: items.filter((item) => item.status !== "Not Submitted").length,
+                    gradedCount: items.filter((item) => item.status === "Graded").length,
+                    pointsEarned,
+                    pointsPossible,
+                    cumulativeScore: pointsPossible === 0
+                        ? null
+                        : Math.round((pointsEarned / pointsPossible) * MAX_ASSIGNMENT_SCORE * 100) / 100,
+                    assignments: items
+                };
+            });
+
+        res.status(200).json({
+            student: {
+                _id: student._id,
+                name: student.name,
+                image: student.image,
+                stack: student.stack
+            },
+            maxScore: MAX_ASSIGNMENT_SCORE,
+            weeks
+        });
+    } catch (err) {
+        next(ApiError.badRequest(`${err}`));
+    }
+};
+
 module.exports = {
     // Assignment Management
     createAssignment,
@@ -637,5 +758,8 @@ module.exports = {
     getSubmissionsByAssignment
     ,
     // Performance Review
-    getStudentPerformanceReview
+    getStudentPerformanceReview,
+
+    // Weekly Assignment Scores
+    getStudentAssignmentScores
 };
