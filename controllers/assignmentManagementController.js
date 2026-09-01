@@ -476,9 +476,10 @@ const gradeSubmission = async (req, res, next) => {
         // reads "updated"
         const wasGraded = submission.grade !== undefined && submission.grade !== null;
 
-        // Update submission with grade and feedback
+        // Update submission with grade and feedback. Feedback is only overwritten
+        // when the caller sent the key, so a grade-only save keeps any existing comment.
         submission.grade = numericGrade;
-        submission.feedback = feedback;
+        if (feedback !== undefined) submission.feedback = feedback;
         submission.status = "Graded";
         await submission.save();
 
