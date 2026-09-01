@@ -5,412 +5,225 @@ const productSOTW = require("../models/PSOW");
 const frontendSOTW = require("../models/SOW");
 const ApiError = require("../error/ApiError");
 
+// User documents store `stack` lowercase ("frontend", "product design") because
+// that is what the signup validator allows, while Assignment documents use the
+// Title Case form ("Front End"). Neither field carries a schema enum, so every
+// stack comparison normalizes both sides — the same helper users.js and
+// assignmentManagementController.js already use.
+const normalizeStack = (stack) => (stack || "").toLowerCase().replace(/\s+/g, "");
 
-const theAlgorithm ={
-    "chooseFrontEndSOTW": async function(req, res, next){
-        try{
-            //get week to be used
-            const week = req.body.week
-            //get all results for the week
-            const resultsForWeek = await ratings.find().where("week").equals(`${week}`).populate("student");
-            if (resultsForWeek.length === 0){
-                return next(ApiError.badRequest("No results for this week"))
-            }
-            //find students in the Front end
-            const frontEndStudents = resultsForWeek.filter((result)=> (result?.student?.stack === "Front End") && (result?.student?.role === "student"));
-            // //If there are no students
-            if(frontEndStudents.length !== 0){
-                    //Get array for all students scores
-                    const arrayOfTotalScores = frontEndStudents.map((rating)=> rating.total)
-                //Find Highest Score
-                const highestScore = Math.max(...arrayOfTotalScores);
-                //Check if more than one student gets the Highest score
-                const highScoreArray = arrayOfTotalScores.filter((score)=> score === highestScore)
-                //check if there is already a SOTW for that week
-                const check = await frontendSOTW.find().where("week").equals(`${week}`);
-                //If there is no SOTW for that week
-                if(check.length === 0){
-                    //If the length of highScoreArray is 1, then make student SOTW else use other metrics
-                    if(highScoreArray.length  === 1){
-                            //to get result with highest score
-                            const resultWithHighestScore = frontEndStudents.filter((result)=> result.total === highestScore);
-                            //to get id of Student with highest score
-                            const studentId = resultWithHighestScore[0].student?._id
-                        //find student from data base
-                        const student = await users.findById(studentId);
-                        //create an instance for SOTW
-                        const newSOW = await frontendSOTW({week: week});
-                        //add student Id to SOTW document
-                        newSOW.student = student;
-                        newSOW.save()
-                        res.status(200).json({data: "Student Added"})
-                    }else{
-                            //to get results with highest score
-                            const resultWithHighestScores = frontEndStudents.filter((result)=> result.total === highestScore);
-                        //check improvement for each student
-                        if(week >= 2){
-                            // Find the most improved student in a single pass
-                            let maxImprovement = -Infinity;
-                            let mostImprovedStudents = [];
-                            for (const rating of resultWithHighestScores) {
-                                if (rating.student.allRatings && rating.student.allRatings.length >= 2) {
-                                    const ratingsId = rating.student.allRatings.slice(-2); // [previous, latest]
-                                    const values = await Promise.all(
-                                        ratingsId.map(async (ratingId) => {
-                                            const found = await ratings.findById(ratingId).lean().exec();
-                                            return found ? found.total : 0;
-                                        })
-                                    );
-                                    const improvement = values[1] - values[0];
-                                    if (values[1] > values[0]) {
-                                        if (improvement > maxImprovement) {
-                                            maxImprovement = improvement;
-                                            mostImprovedStudents = [rating];
-                                        } else if (improvement === maxImprovement) {
-                                            mostImprovedStudents.push(rating);
-                                        }
-                                    }
-                                }
-                            }
-                            if (mostImprovedStudents.length === 1) {
-                                const studentId = mostImprovedStudents[0].student?._id;
-                                const student = await users.findById(studentId);
-                                const newSOW = await frontendSOTW({week: week});
-                                newSOW.student = student;
-                                newSOW.save()
-                                res.status(200).json({data: "Student Added"});
-                            } else if (mostImprovedStudents.length > 1) {
-                                // Pick randomly among most improved
-                                const index = Math.floor(Math.random() * mostImprovedStudents.length);
-                                const studentId = mostImprovedStudents[index].student?._id;
-                                const student = await users.findById(studentId);
-                                const newSOW = await frontendSOTW({week: week});
-                                newSOW.student = student;
-                                newSOW.save()
-                                res.status(200).json({data: "Student Added"});
-                            } else {
-                                // If no improved students, pick randomly from all candidates
-                                const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                                const studentId = resultWithHighestScores[index].student?._id;
-                                const student = await users.findById(studentId);
-                                const newSOW = await frontendSOTW({week: week});
-                                newSOW.student = student;
-                                newSOW.save()
-                                res.status(200).json({data: "Student Added"});
-                            }
-                        } else {
-                            // If week < 2, pick randomly from highest score candidates only
-                            const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                            const studentId = resultWithHighestScores[index].student?._id;
-                            const student = await users.findById(studentId);
-                            const newSOW = await frontendSOTW({week: week});
-                            newSOW.student = student;
-                            newSOW.save()
-                            res.status(200).json({data: "Student Added"});
-                        }
-                    }
-                }else{
-                    res.status(400).json({message: `There is a SOTW for week: ${week} already`})
-                }
-            }else{
-                res.status(400).json({message: "there are no students yet"})
-            }
-            
-        }catch(err){
-            next(ApiError.badRequest(`${err}`))
+const FRONT_END = "frontend";
+const BACK_END = "backend";
+const PRODUCT_DESIGN = "productdesign";
+
+// Display label and winner model for each stack, keyed by its normalized value.
+const STACKS = {
+    [FRONT_END]: { label: "Front End", model: frontendSOTW },
+    [BACK_END]: { label: "Back End", model: backendSOTW },
+    [PRODUCT_DESIGN]: { label: "Product Design", model: productSOTW },
+};
+
+// `role` is a bare String on the user schema too, so it gets the same treatment.
+const isStudentIn = (student, normalizedStack) =>
+    normalizeStack(student?.stack) === normalizedStack &&
+    normalizeStack(student?.role) === "student";
+
+const parseWeek = (value) => {
+    const week = Number(value);
+    return Number.isInteger(week) && week >= 1 ? week : null;
+};
+
+const pickRandom = (list) => list[Math.floor(Math.random() * list.length)];
+
+/**
+ * Break a tie on the top weekly score by biggest week-on-week improvement,
+ * falling back to a random pick among the tied students.
+ *
+ * Improvement only exists from week 2 onward, and only for students with at
+ * least two recorded ratings — anyone else stays in the running via the
+ * random fallback rather than being dropped.
+ */
+async function breakTie(topScorers, week) {
+    if (week < 2) {
+        return pickRandom(topScorers);
+    }
+
+    let maxImprovement = -Infinity;
+    let mostImproved = [];
+
+    for (const rating of topScorers) {
+        const allRatings = rating.student?.allRatings;
+        if (!allRatings || allRatings.length < 2) continue;
+
+        // The last two entries are [previous, latest].
+        const [previous, latest] = await Promise.all(
+            allRatings.slice(-2).map(async (ratingId) => {
+                const found = await ratings.findById(ratingId).lean().exec();
+                return found ? found.total : 0;
+            })
+        );
+
+        if (latest <= previous) continue;
+
+        const improvement = latest - previous;
+        if (improvement > maxImprovement) {
+            maxImprovement = improvement;
+            mostImproved = [rating];
+        } else if (improvement === maxImprovement) {
+            mostImproved.push(rating);
         }
+    }
+
+    return pickRandom(mostImproved.length ? mostImproved : topScorers);
+}
+
+/**
+ * Shared implementation behind the three per-stack Student of the Week routes.
+ *
+ * Ranks a stack's students on their weekly `ratings.total`, so the week's
+ * ratings must already be entered. A stack that already has a winner for the
+ * week cannot be picked again.
+ */
+async function chooseSOTW(normalizedStack, req, res, next) {
+    try {
+        const { label, model } = STACKS[normalizedStack];
+
+        const week = parseWeek(req.body.week);
+        if (week === null) {
+            return res.status(400).json({ message: "A valid week is required" });
+        }
+
+        const existing = await model.find().where("week").equals(week);
+        if (existing.length !== 0) {
+            return res.status(400).json({ message: `There is a SOTW for week: ${week} already` });
+        }
+
+        const resultsForWeek = await ratings.find().where("week").equals(week).populate("student");
+        if (resultsForWeek.length === 0) {
+            return res.status(400).json({
+                message: `No weekly ratings have been entered for week ${week} yet`,
+            });
+        }
+
+        // Distinct from the check above: ratings exist for the week, just none
+        // belonging to a student in this stack.
+        const candidates = resultsForWeek.filter((result) => isStudentIn(result?.student, normalizedStack));
+        if (candidates.length === 0) {
+            return res.status(400).json({
+                message: `No rated students in the ${label} stack for week ${week}`,
+            });
+        }
+
+        const highestScore = Math.max(...candidates.map((rating) => rating.total));
+        const topScorers = candidates.filter((result) => result.total === highestScore);
+
+        const winner = topScorers.length === 1 ? topScorers[0] : await breakTie(topScorers, week);
+
+        await model.create({ week, student: winner.student._id });
+        return res.status(200).json({ data: "Student Added" });
+    } catch (err) {
+        next(ApiError.badRequest(`${err}`));
+    }
+}
+
+const theAlgorithm = {
+    "chooseFrontEndSOTW": function(req, res, next){
+        return chooseSOTW(FRONT_END, req, res, next);
     },
-    "chooseBackEndSOTW": async function(req, res, next){
-        try{
-            //get week to be used
-            const week = req.body.week
-            //get all results for the week
-            const resultsForWeek = await ratings.find().where("week").equals(`${week}`).populate("student");
-            const backEndStudents = resultsForWeek.filter((result)=> (result?.student?.stack === "Back End") && (result?.student?.role === "student"));
-            // If there are no backend students for the week, return an error
-            if (backEndStudents.length === 0) {
-                return res.status(400).json({message: "there are no students yet"});
-            }
-            const arrayOfTotalScores = backEndStudents.map((rating)=> rating.total);
-            const highestScore = Math.max(...arrayOfTotalScores);
-            const highScoreArray = arrayOfTotalScores.filter((score)=> score === highestScore);
-            const check = await backendSOTW.find().where("week").equals(`${week}`);
-            // If a SOTW already exists for this week, return an error
-            if (check.length !== 0) {
-                return res.status(400).json({message: `There is a SOTW for week: ${week} already`});
-            }
-            // If only one student has the highest score, select them as SOTW
-            if (highScoreArray.length === 1) {
-                const resultWithHighestScore = backEndStudents.filter((result)=> result.total === highestScore);
-                const studentId = resultWithHighestScore[0].student?._id;
-                const student = await users.findById(studentId);
-                const newSOW = await backendSOTW({week: week});
-                newSOW.student = student;
-                newSOW.save();
-                return res.status(200).json({data: "Student Added"});
-            } else {
-                // If multiple students have the highest score
-                const resultWithHighestScores = backEndStudents.filter((result)=> result.total === highestScore);
-                // If it's week 2 or later, check for most improved student
-                if (week >= 2) {
-                    let maxImprovement = -Infinity;
-                    let mostImprovedStudents = [];
-                    for (const rating of resultWithHighestScores) {
-                        if (rating.student.allRatings && rating.student.allRatings.length >= 2) {
-                            const ratingsId = rating.student.allRatings.slice(-2);
-                            const values = await Promise.all(
-                                ratingsId.map(async (ratingId) => {
-                                    const found = await ratings.findById(ratingId).lean().exec();
-                                    return found ? found.total : 0;
-                                })
-                            );
-                            const improvement = values[1] - values[0];
-                            // If the student improved from previous week
-                            if (values[1] > values[0]) {
-                                if (improvement > maxImprovement) {
-                                    maxImprovement = improvement;
-                                    mostImprovedStudents = [rating];
-                                } else if (improvement === maxImprovement) {
-                                    mostImprovedStudents.push(rating);
-                                }
-                            }
-                        }
-                    }
-                    // If only one student is most improved, select them
-                    if (mostImprovedStudents.length === 1) {
-                        const studentId = mostImprovedStudents[0].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await backendSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    // If multiple students are equally most improved, pick randomly
-                    } else if (mostImprovedStudents.length > 1) {
-                        const index = Math.floor(Math.random() * mostImprovedStudents.length);
-                        const studentId = mostImprovedStudents[index].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await backendSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    // If no students improved, pick randomly from highest scorers
-                    } else {
-                        const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                        const studentId = resultWithHighestScores[index].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await backendSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    }
-                } else {
-                    // If it's week 1, pick randomly from highest scorers
-                    const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                    const studentId = resultWithHighestScores[index].student?._id;
-                    const student = await users.findById(studentId);
-                    const newSOW = await backendSOTW({week: week});
-                    newSOW.student = student;
-                    newSOW.save();
-                    return res.status(200).json({data: "Student Added"});
-                }
-            }
-
-        }catch(err){
-            next(ApiError.badRequest(`${err}`))
-        }
+    "chooseBackEndSOTW": function(req, res, next){
+        return chooseSOTW(BACK_END, req, res, next);
     },
-    "chooseProductSOTW": async function(req, res, next){
-        try{
-            // Get week to be used
-            const week = req.body.week
-            // Get all results for the week
-            const resultsForWeek = await ratings.find().where("week").equals(`${week}`).populate("student");
-            // Find students in Product Design
-            const productStudents = resultsForWeek.filter((result)=> (result?.student?.stack === "Product Design") && (result?.student?.role === "student"));
-            // If there are no product design students for the week, return an error
-            if (productStudents.length === 0) {
-                return res.status(400).json({message: "there are no students yet"});
-            }
-            // Get array of total scores for all product students
-            const arrayOfTotalScores = productStudents.map((rating)=> rating.total);
-            // Find highest score
-            const highestScore = Math.max(...arrayOfTotalScores);
-            // Check if more than one student gets the highest score
-            const highScoreArray = arrayOfTotalScores.filter((score)=> score === highestScore);
-            // Check if there is already a SOTW for that week
-            const check = await productSOTW.find().where("week").equals(`${week}`);
-            // If a SOTW already exists for this week, return an error
-            if (check.length !== 0) {
-                return res.status(400).json({message: `There is a SOTW for week: ${week} already`});
-            }
-            // If only one student has the highest score, select them as SOTW
-            if (highScoreArray.length === 1) {
-                const resultWithHighestScore = productStudents.filter((result)=> result.total === highestScore);
-                const studentId = resultWithHighestScore[0].student?._id;
-                const student = await users.findById(studentId);
-                const newSOW = await productSOTW({week: week});
-                newSOW.student = student;
-                newSOW.save();
-                return res.status(200).json({data: "Student Added"});
-            } else {
-                // If multiple students have the highest score
-                const resultWithHighestScores = productStudents.filter((result)=> result.total === highestScore);
-                // If it's week 2 or later, check for most improved student
-                if (week >= 2) {
-                    let maxImprovement = -Infinity;
-                    let mostImprovedStudents = [];
-                    for (const rating of resultWithHighestScores) {
-                        if (rating.student.allRatings && rating.student.allRatings.length >= 2) {
-                            const ratingsId = rating.student.allRatings.slice(-2);
-                            const values = await Promise.all(
-                                ratingsId.map(async (ratingId) => {
-                                    const found = await ratings.findById(ratingId).lean().exec();
-                                    return found ? found.total : 0;
-                                })
-                            );
-                            const improvement = values[1] - values[0];
-                            // If the student improved from previous week
-                            if (values[1] > values[0]) {
-                                if (improvement > maxImprovement) {
-                                    maxImprovement = improvement;
-                                    mostImprovedStudents = [rating];
-                                } else if (improvement === maxImprovement) {
-                                    mostImprovedStudents.push(rating);
-                                }
-                            }
-                        }
-                    }
-                    // If only one student is most improved, select them
-                    if (mostImprovedStudents.length === 1) {
-                        const studentId = mostImprovedStudents[0].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await productSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    // If multiple students are equally most improved, pick randomly
-                    } else if (mostImprovedStudents.length > 1) {
-                        const index = Math.floor(Math.random() * mostImprovedStudents.length);
-                        const studentId = mostImprovedStudents[index].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await productSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    // If no students improved, pick randomly from highest scorers
-                    } else {
-                        const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                        const studentId = resultWithHighestScores[index].student?._id;
-                        const student = await users.findById(studentId);
-                        const newSOW = await productSOTW({week: week});
-                        newSOW.student = student;
-                        newSOW.save();
-                        return res.status(200).json({data: "Student Added"});
-                    }
-                } else {
-                    // If it's week 1, pick randomly from highest scorers
-                    const index = Math.floor(Math.random() * resultWithHighestScores.length);
-                    const studentId = resultWithHighestScores[index].student?._id;
-                    const student = await users.findById(studentId);
-                    const newSOW = await productSOTW({week: week});
-                    newSOW.student = student;
-                    newSOW.save();
-                    return res.status(200).json({data: "Student Added"});
-                }
-            }
-
-        }catch(err){
-            next(ApiError.badRequest(`${err}`))
-        }
+    "chooseProductSOTW": function(req, res, next){
+        return chooseSOTW(PRODUCT_DESIGN, req, res, next);
     },
     "chooseStudentsOfTheMonth": async function(req, res, next){
         try{
-            // Get all students per stack
-            const frontEndStudents = await users.find({ role: "student", stack: "Front End" }).select('name _id');
-            const backEndStudents = await users.find({ role: "student", stack: "Back End" }).select('name _id');
-            const productDesignStudents = await users.find({ role: "student", stack: "Product Design" }).select('name _id');
-
-            // Helper to get last four rating totals for a student
-            async function getLastFourTotals(studentId) {
-                const ratingsArr = await ratings.find({ student: studentId }).sort({ week: -1 }).limit(4);
-                return ratingsArr.map(r => r.total);
+            const week = parseWeek(req.body.week);
+            if (week === null) {
+                return res.status(400).json({ message: "A valid week is required" });
             }
 
-            // Build array of {id, name, average} for each stack
-            const checkingArrayFront = await Promise.all(frontEndStudents.map(async (e) => {
-                const lastFour = await getLastFourTotals(e._id);
-                const sum = lastFour.reduce((p, v) => p + v, 0);
-                const val = lastFour.length ? sum / lastFour.length : 0;
-                return { id: e._id, name: e.name, average: val };
-            }));
-            const checkingArrayBack = await Promise.all(backEndStudents.map(async (e) => {
-                const lastFour = await getLastFourTotals(e._id);
-                const sum = lastFour.reduce((p, v) => p + v, 0);
-                const val = lastFour.length ? sum / lastFour.length : 0;
-                return { id: e._id, name: e.name, average: val };
-            }));
-            const checkingArrayProduct = await Promise.all(productDesignStudents.map(async (e) => {
-                const lastFour = await getLastFourTotals(e._id);
-                const sum = lastFour.reduce((p, v) => p + v, 0);
-                const val = lastFour.length ? sum / lastFour.length : 0;
-                return { id: e._id, name: e.name, average: val };
-            }));
+            // Mongo cannot normalize the stored stack on its own, so fetch every
+            // student once and partition in memory — the same approach
+            // getRankingsAndTopAssignments uses in users.js.
+            const allStudents = await users.find({ role: "student" }).select("name _id stack");
 
+            const averageOfLastFour = async (studentId) => {
+                const lastFour = await ratings.find({ student: studentId }).sort({ week: -1 }).limit(4);
+                if (lastFour.length === 0) return 0;
+                return lastFour.reduce((sum, rating) => sum + rating.total, 0) / lastFour.length;
+            };
 
-            function getHighestAverage(arr) {
-                if (arr.length === 0) {
-                  return null; // Return null if the array is empty
-                }
-                let highestAverageObject = arr[0]; // Initialize with the first object
-                for (let i = 1; i < arr.length; i++) {
-                    if (arr[i].average > highestAverageObject.average) {
-                        highestAverageObject = arr[i]; // Update the highest average object
-                    }
-                }
-                return highestAverageObject;
+            // Returns null for a stack with no students rather than throwing.
+            const topOfStack = async (normalizedStack) => {
+                const inStack = allStudents.filter((student) => normalizeStack(student.stack) === normalizedStack);
+                const scored = await Promise.all(inStack.map(async (student) => ({
+                    id: student._id,
+                    name: student.name,
+                    average: await averageOfLastFour(student._id),
+                })));
+                return scored.reduce(
+                    (best, entry) => (best === null || entry.average > best.average ? entry : best),
+                    null
+                );
+            };
+
+            const [front, back, product] = await Promise.all([
+                topOfStack(FRONT_END),
+                topOfStack(BACK_END),
+                topOfStack(PRODUCT_DESIGN),
+            ]);
+
+            const winners = [
+                { winner: front, model: frontendSOTW },
+                { winner: back, model: backendSOTW },
+                { winner: product, model: productSOTW },
+            ].filter((entry) => entry.winner !== null);
+
+            if (winners.length === 0) {
+                return res.status(400).json({ message: "There are no students to rank for the month" });
             }
 
-            const frontendStudentOfTheMonth = getHighestAverage(checkingArrayFront)
-            const backendStudentOfTheMonth = getHighestAverage(checkingArrayBack)
-            const productDesignStudentOfTheMonth = getHighestAverage(checkingArrayProduct)
+            // These are written over the given week's Student of the Week records,
+            // replacing whatever the dashboard shows for that week.
+            await Promise.all(winners.map((entry) => entry.model.create({ week, student: entry.winner.id })));
 
-            const frontEndStudent = await users.findById(frontendStudentOfTheMonth.id);
-            const backEndStudent = await users.findById(backendStudentOfTheMonth.id);
-            const productDesignStudent = await users.findById(productDesignStudentOfTheMonth.id);
-            //create an instance for SOTW
-            const newSOWF = await frontendSOTW({week: req.body.week});
-            const newSOWB = await backendSOTW({week: req.body.week});
-            const newSOWP = await productSOTW({week: req.body.week});
-            //add student Id to SOTW document
-            newSOWF.student = frontEndStudent;
-            newSOWF.save()
-            newSOWB.student = backEndStudent;
-            newSOWB.save()
-            newSOWP.student = productDesignStudent;
-            newSOWP.save()
-            res.status(200).json({front: frontendStudentOfTheMonth, back: backendStudentOfTheMonth, product: productDesignStudentOfTheMonth})
+            res.status(200).json({ front, back, product })
         }catch(err){
             next(ApiError.badRequest(`${err}`))
         }
     },
     "setStudentsPosition": async function(req, res, next){
         try{
-            const stacks = ["Front End", "Back End", "Product Design"];
-            
-            for (const stack of stacks) {
-                // Get all students for the current stack, sorted by overallRating in descending order
-                const students = await users.find({ role: "student", stack: stack })
-                    .sort({ overallRating: -1 });
-                
-                // Update positions
-                for (let i = 0; i < students.length; i++) {
-                    const student = students[i];
-                    student.position = i + 1; // Position starts from 1
-                    await student.save();
-                }
+            const students = await users.find({ role: "student" }).select("_id stack overallRating");
+
+            const updates = [];
+            for (const normalizedStack of Object.keys(STACKS)) {
+                const ranked = students
+                    .filter((student) => normalizeStack(student.stack) === normalizedStack)
+                    .sort((a, b) => (b.overallRating || 0) - (a.overallRating || 0));
+
+                ranked.forEach((student, index) => {
+                    updates.push({
+                        updateOne: {
+                            filter: { _id: student._id },
+                            update: { $set: { position: index + 1 } }, // Position starts from 1
+                        },
+                    });
+                });
             }
-            
-            res.status(200).json({ message: "Student positions updated successfully for all stacks" });
+
+            // bulkWrite rather than a save() per document: these are long-lived
+            // records and a full-document validation pass would reject any that
+            // predate a currently-required field.
+            if (updates.length > 0) {
+                await users.bulkWrite(updates);
+            }
+
+            res.status(200).json({
+                message: "Student positions updated successfully for all stacks",
+                updated: updates.length,
+            });
         }catch(err){
             next(ApiError.badRequest(`${err}`))
         }
