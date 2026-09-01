@@ -290,12 +290,24 @@ require('dotenv').config();
 
 
 
+// Cleanup is best-effort: an already-removed temp file must never turn into a 500.
+const safeUnlink = (filePath) => {
+  if (!filePath) return;
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('Failed to remove temp file:', filePath, error.message);
+  }
+};
+
 const checkIn = async (req, res) => {
       if (!req.file) {
         return res.status(400).json({ message: 'No image provided' });
       }
 
       const tempFilePath = req.file.path; // multer saved file
+      // Declared out here so the catch below can clean it up too.
+      let outputFilePath = null;
 
   try {
     const checkInTime = cohortNow();
@@ -355,9 +367,26 @@ const checkIn = async (req, res) => {
 
       const fileName = path.basename(tempFilePath);
       const outputFileName = `watermarked-${fileName}`;
-      const outputFilePath = path.join(outputDir, outputFileName);
+      outputFilePath = path.join(outputDir, outputFileName);
 
       const newImage = sharp(tempFilePath);
+
+      // A client that captures before the webcam has decoded a frame uploads a
+      // valid but entirely black JPEG. Reject it here, before any record exists,
+      // so the once-per-day check above still lets the user retry. This has to
+      // run on the original upload: the white watermark composited below would
+      // add enough variance and entropy to mask a blank frame.
+      const stats = await newImage.stats();
+      const isBlank =
+        stats.entropy < 0.1 &&
+        stats.channels.every((channel) => channel.stdev < 3 && channel.mean < 8);
+      if (isBlank) {
+        fs.unlinkSync(tempFilePath);
+        return res.status(400).json({
+          message: "The captured photo was blank. Please retry your check-in."
+        });
+      }
+
       const { width, height } = await newImage.metadata();
       const svgText = `
         <svg width="${width}" height="${height}">
@@ -384,7 +413,8 @@ const checkIn = async (req, res) => {
 
       const result = await cloudinary.uploader.upload(outputFilePath, { folder: 'AttendanceData-Image' });
 
-      fs.unlinkSync(tempFilePath);
+      safeUnlink(tempFilePath);
+      safeUnlink(outputFilePath);
 
       const score = punctualityScoreFor(timeTaken);
 
@@ -409,6 +439,8 @@ const checkIn = async (req, res) => {
       return res.status(400).json({ message: "Sorry you can't checkIn today!" });
     }
   } catch (error) {
+    safeUnlink(tempFilePath);
+    safeUnlink(outputFilePath);
 
     return res.status(500).json({ message: 'Internal Server Error: ' + error.message });
   }
