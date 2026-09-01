@@ -139,7 +139,8 @@ const getAssignmentsByWeekAndStack = async (req, res, next) => {
     }
 };
 
-// Get all assignments by week (for tutors)
+// Get a week's assignments for an explicitly requested stack, plus General.
+// Serves both the student task board and a tutor viewing a student's board.
 const getAssignmentsByWeek = async (req, res, next) => {
     try {
         const { week } = req.params;
@@ -153,8 +154,17 @@ const getAssignmentsByWeek = async (req, res, next) => {
             return next(ApiError.badRequest("Stack parameter is required"));
         }
 
-        const assignments = await Assignment.find({ week: Number(week), stack: stack })
-            .sort({ stack: 1, createdAt: -1 });
+        // A stack's task list always includes anything issued to "General", matching
+        // getAssignmentsByWeekAndStack and getStudentAssignmentScores — otherwise a
+        // student is graded on General tasks their task board never showed them.
+        // Sorted by due date so the stack's own tasks and the General ones read as
+        // one deadline-ordered list rather than clumping by stack name.
+        const stacks = stack === "General" ? ["General"] : [stack, "General"];
+
+        const assignments = await Assignment.find({
+            week: Number(week),
+            stack: { $in: stacks }
+        }).sort({ dueDateTime: 1, createdAt: -1 });
 
         const formattedAssignments = assignments.map(assignment => ({
             ...assignment.toObject(),

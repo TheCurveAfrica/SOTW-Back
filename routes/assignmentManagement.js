@@ -38,8 +38,9 @@ router.post("/assignments/create", authorizedTutor, createAssignment);
 // Get assignments by week and stack (for students)
 router.get("/assignments/week/:week", authenticate, getAssignmentsByWeekAndStack);
 
-// Get all assignments by week (also used by the student task board, so it stays
-// on authenticate rather than authorizedTutor)
+// Get a week's assignments for the requested stack plus anything issued to
+// "General" (also used by the student task board, so it stays on authenticate
+// rather than authorizedTutor)
 router.get("/assignments/week/:week/all", authenticate, getAssignmentsByWeek);
 
 // Get all assignments (for tutors)
