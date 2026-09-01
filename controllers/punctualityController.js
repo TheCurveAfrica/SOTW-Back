@@ -7,6 +7,8 @@ const cloudinary = require("../middleware/cloudinary");
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
+const sharp = require("sharp");
+const { cohortNow, isClassDay, punctualityScoreFor } = require("../utils/attendance");
 
 const _ = require('lodash');
 //const paymentModel = require("../model/ConfirmPayment");
@@ -289,12 +291,16 @@ require('dotenv').config();
 
 
 const checkIn = async (req, res) => {
+      if (!req.file) {
+        return res.status(400).json({ message: 'No image provided' });
+      }
+
       const tempFilePath = req.file.path; // multer saved file
 
   try {
-    const today = new Date();
+    const checkInTime = cohortNow();
 
-    if (today.getDay() === 1 || today.getDay() === 3 || today.getDay() === 5) {
+    if (isClassDay(checkInTime)) {
       const userId = req.user.id;
       const user = await userModel.findById(userId);
       if (!user) {
@@ -327,14 +333,13 @@ const checkIn = async (req, res) => {
  
         return res.status(400).json({ message: "Please enter a valid location" })};
 
-      if (!req.file) {      
+            // One pair of strings serves the duplicate check, the watermark, the
+            // stored record and the score, so they can never disagree.
+            const dateTaken = checkInTime.format('YYYY-MM-DD');
+            const timeTaken = checkInTime.format('HH:mm:ss');
 
-        return res.status(400).json({ message: 'No image provided' })};
-
-            const date = today.toISOString().split('T')[0];
-
-            const checkInStatus = await dataModel.find({ userId: userId });
-            if (checkInStatus.length > 0 && checkInStatus.findIndex((e)=> e.date === date) !== -1) {
+            const alreadyCheckedIn = await dataModel.findOne({ userId: userId, date: dateTaken });
+            if (alreadyCheckedIn) {
                       fs.unlinkSync(tempFilePath);
 
                 return res.status(400).json({
@@ -343,16 +348,9 @@ const checkIn = async (req, res) => {
             }
 
       // Watermark with sharp
-      const sharp = require("sharp");
-      const moment = require('moment-timezone');
-      const path = require('path');
-
-      const checkInTime = moment().utcOffset('+01:00');
       const outputDir = path.join(__dirname, 'media');
       if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-      const dateTaken = checkInTime.format('YYYY-MM-DD');
-      const timeTaken = checkInTime.format('HH:mm:ss');
       const watermarkText = `Date: ${dateTaken}\nTime: ${timeTaken}`;
 
       const fileName = path.basename(tempFilePath);
@@ -388,14 +386,7 @@ const checkIn = async (req, res) => {
 
       fs.unlinkSync(tempFilePath);
 
-      let score;
-      const newDate = new Date(today.getTime());
-      newDate.setHours(newDate.getHours() + 1);
-      let newTime = newDate.toLocaleTimeString('en-US', { hour12: false });
-      if (newTime > "10:00:00") score = 0;
-      else if (newTime <= "10:00:00" && newTime >= "09:46:00") score = 10;
-      else if (newTime <= "09:45:00" && newTime >= "00:00:00") score = 20;
-      else score = 0;
+      const score = punctualityScoreFor(timeTaken);
 
       const userData = new dataModel({
         userId,
@@ -993,10 +984,11 @@ const deleteAssessment = async (req, res) => {
 const runCheck =async(req, res)=>{
     try{
         const userId = req.params.id;
-        const today = new Date();
-        const date = today.toISOString().split('T')[0];
+        // Same WAT clock the checkIn guard uses, so this pre-check and the real
+        // guard can never disagree about which day it is.
+        const date = cohortNow().format('YYYY-MM-DD');
         const checkInStatus = await dataModel.find({ userId: userId });
-            if (checkInStatus.length > 0 && checkInStatus[0].date === date) {
+            if (checkInStatus.some((e) => e.date === date)) {
                 return res.status(400).json({
                     message: "Sorry you can only checkIn once per day!"
                 })
