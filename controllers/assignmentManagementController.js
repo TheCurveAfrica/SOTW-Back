@@ -747,6 +747,86 @@ const getStudentAssignmentScores = async (req, res, next) => {
     }
 };
 
+// Get the highest scorer for each of a week's assignments.
+const getTopPerformersByWeek = async (req, res, next) => {
+    try {
+        const week = Number(req.params.week);
+        if (!Number.isInteger(week) || week < 1) {
+            return next(ApiError.badRequest("Invalid week"));
+        }
+
+        // Stack matching is case/space-insensitive, matching the convention the
+        // rankings endpoint already uses.
+        const normalize = (value) => (value || "").replace(/\s+/g, "").toLowerCase();
+        const stackQuery = req.query.stack ? normalize(req.query.stack) : null;
+
+        // "General" assignments are issued to every stack, so they stay in the
+        // list even when a stack filter is applied (same rule as getAssignmentsByWeek).
+        let assignments = await Assignment.find({ week }).select("title stack");
+        if (stackQuery) {
+            assignments = assignments.filter(
+                (a) => normalize(a.stack) === stackQuery || a.stack === "General"
+            );
+        }
+        if (assignments.length === 0) {
+            return res.status(200).json({ week, maxScore: MAX_ASSIGNMENT_SCORE, topPerformers: [] });
+        }
+
+        const gradedSubs = await AssignmentSubmission.find({
+            assignment: { $in: assignments.map((a) => a._id) },
+            status: "Graded"
+        }).populate("student", "name image stack");
+
+        // With a stack filter, a General assignment must still be won by someone
+        // from the requested stack.
+        const eligible = stackQuery
+            ? gradedSubs.filter((s) => normalize(s.student?.stack) === stackQuery)
+            : gradedSubs;
+
+        const byAssignment = new Map();
+        eligible.forEach((sub) => {
+            const aid = sub.assignment?.toString();
+            if (!aid) return;
+            if (!byAssignment.has(aid)) byAssignment.set(aid, []);
+            byAssignment.get(aid).push(sub);
+        });
+
+        const topPerformers = assignments.map((assignment) => {
+            const subs = byAssignment.get(assignment._id.toString()) || [];
+            const base = {
+                assignmentId: assignment._id,
+                title: assignment.title,
+                stack: assignment.stack
+            };
+            if (subs.length === 0) {
+                return { ...base, student: null, grade: null, submittedAt: null, tiedCount: 0 };
+            }
+            const maxGrade = Math.max(...subs.map((s) => s.grade || 0));
+            const tied = subs.filter((s) => (s.grade || 0) === maxGrade);
+            // Deterministic tie-break — earliest submission, then name — so the
+            // winner does not change between page loads.
+            tied.sort((a, b) =>
+                new Date(a.submittedAt) - new Date(b.submittedAt) ||
+                (a.student?.name || "").localeCompare(b.student?.name || "")
+            );
+            const winner = tied[0];
+            return {
+                ...base,
+                student: winner.student,
+                grade: winner.grade,
+                submittedAt: winner.submittedAt,
+                tiedCount: tied.length
+            };
+        });
+
+        topPerformers.sort((a, b) => a.title.localeCompare(b.title));
+
+        res.status(200).json({ week, maxScore: MAX_ASSIGNMENT_SCORE, topPerformers });
+    } catch (err) {
+        next(ApiError.badRequest(`${err}`));
+    }
+};
+
 module.exports = {
     // Assignment Management
     createAssignment,
@@ -771,5 +851,8 @@ module.exports = {
     getStudentPerformanceReview,
 
     // Weekly Assignment Scores
-    getStudentAssignmentScores
+    getStudentAssignmentScores,
+
+    // Weekly Top Performers
+    getTopPerformersByWeek
 };

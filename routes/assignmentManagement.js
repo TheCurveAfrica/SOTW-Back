@@ -24,7 +24,10 @@ const {
     getStudentPerformanceReview,
 
     // Weekly Assignment Scores
-    getStudentAssignmentScores
+    getStudentAssignmentScores,
+
+    // Weekly Top Performers
+    getTopPerformersByWeek
 } = require("../controllers/assignmentManagementController");
 // NOTE: authorizedTutor calls authenticate internally, so it replaces it rather
 // than being chained after it.
@@ -42,6 +45,9 @@ router.get("/assignments/week/:week", authenticate, getAssignmentsByWeekAndStack
 // "General" (also used by the student task board, so it stays on authenticate
 // rather than authorizedTutor)
 router.get("/assignments/week/:week/all", authenticate, getAssignmentsByWeek);
+
+// Highest scorer per task for a week (students and tutors), optionally ?stack=
+router.get("/assignments/week/:week/top-performers", authenticate, getTopPerformersByWeek);
 
 // Get all assignments (for tutors)
 router.get("/assignments/all", authenticate, getAllAssignments);
