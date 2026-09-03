@@ -111,5 +111,11 @@ app.use("/api", require("./routes/registration"));
 //program settings routes (current week, cohort start date, program length)
 app.use("/api", require("./routes/programSettings"));
 
+//class-day exception requests (students request, tutors approve/decline)
+app.use("/api", require("./routes/classExceptions"));
+
+//in-app notifications + the email dispatch endpoint
+app.use("/api", require("./routes/notifications"));
+
 //error middleware
 app.use(apiErrorHandler);

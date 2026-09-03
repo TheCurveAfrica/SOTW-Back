@@ -21,6 +21,17 @@ image: {
 punctualityScore: {
     type: Number,
 },
+// "excused" rows are written by an approved class-day exception request, not by
+// a check-in: they have no time and no image. They exist so an excused absence
+// shows up in attendance history as excused rather than as an unexplained gap.
+// Every average over this collection MUST skip them - see the reduce() guards in
+// controllers/punctualityController.js - or the 0 above drags the score down,
+// which is the exact opposite of being excused.
+status: {
+    type: String,
+    enum: ['present', 'excused'],
+    default: 'present',
+},
 userId: [{
     type: mongoose.Schema.Types.ObjectId, 
     ref: 'SOWuser',

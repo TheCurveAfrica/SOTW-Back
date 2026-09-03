@@ -350,8 +350,14 @@ const checkIn = async (req, res) => {
             const dateTaken = checkInTime.format('YYYY-MM-DD');
             const timeTaken = checkInTime.format('HH:mm:ss');
 
-            const alreadyCheckedIn = await dataModel.findOne({ userId: userId, date: dateTaken });
-            if (alreadyCheckedIn) {
+            // An excused row is a placeholder written by an approved exception
+            // request, not a check-in - so a student who ends up making it in
+            // after all is not blocked by their own exception. The real
+            // check-in below replaces it.
+            const existingRecord = await dataModel.findOne({ userId: userId, date: dateTaken });
+            const excusedRecordId = existingRecord?.status === "excused" ? existingRecord._id : null;
+
+            if (existingRecord && !excusedRecordId) {
                       fs.unlinkSync(tempFilePath);
 
                 return res.status(400).json({
@@ -417,6 +423,13 @@ const checkIn = async (req, res) => {
       safeUnlink(outputFilePath);
 
       const score = punctualityScoreFor(timeTaken);
+
+      // Clear the excused placeholder first, so turning up leaves exactly one
+      // record for the day - a real, scored check-in.
+      if (excusedRecordId) {
+        await dataModel.deleteOne({ _id: excusedRecordId });
+        user.data.pull(excusedRecordId);
+      }
 
       const userData = new dataModel({
         userId,
@@ -504,6 +517,12 @@ const assessmentData = async (req, res) => {
         // Aggregate the attendance data to calculate total score and count for each user
         const aggregatedData = attendanceData.reduce((acc, curr) => {
             const { userId, punctualityScore, image } = curr;
+
+            // Excused days carry a 0 they were never meant to be scored on -
+            // they exist to show up in attendance history, not to be averaged.
+            // Counting one would lower the score, which is the opposite of
+            // being excused. See models/dataModel.js.
+            if (curr.status === "excused") return acc;
 
             // If userId doesn't exist in accumulator, initialize it with totalScore and count as 0
             if (!acc[userId]) {
@@ -611,6 +630,12 @@ const assessmentDataS = async (req, res) => {
         const aggregatedData = attendanceData.reduce((acc, curr) => {
             const { userId, punctualityScore, image } = curr;
 
+            // Excused days carry a 0 they were never meant to be scored on -
+            // they exist to show up in attendance history, not to be averaged.
+            // Counting one would lower the score, which is the opposite of
+            // being excused. See models/dataModel.js.
+            if (curr.status === "excused") return acc;
+
             // If userId doesn't exist in accumulator, initialize it with totalScore and count as 0
             if (!acc[userId]) {
                 acc[userId] = { totalScore: 0, count: 0 };
@@ -707,6 +732,11 @@ const fetchCheckInWeekly = async (req, res) => {
         // Aggregate the attendance data to calculate total score and count for a user
         const aggregatedData = attendanceData.reduce((acc, curr) => {
             const { userId, punctualityScore } = curr;
+
+            // Excused days are returned to the client in `data` below so the
+            // student sees them in their history, but they must not enter the
+            // average - see models/dataModel.js.
+            if (curr.status === "excused") return acc;
 
             // If userId doesn't exist in accumulator, initialize it with totalScore and count as 0
             if (!acc[userId]) {
