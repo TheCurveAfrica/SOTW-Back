@@ -5,6 +5,13 @@ const ApiError = require("../error/ApiError");
 const Ratings = require("../models/ratings");
 const { sanitizeTaskDescription, htmlToPlainText } = require("../utils/sanitizeTaskDescription");
 const { getProgramSettings, getWeekStart } = require("../utils/programWeek");
+const {
+    parseCohortDateTime,
+    splitCohortDateTime,
+    cohortMidnightFromLocalDate,
+    formatCohortDateTime
+} = require("../utils/cohortTime");
+const { notifyUsersSafely } = require("../services/notificationService");
 
 // Every assignment is graded on the same 0-20 scale, enforced by
 // AssignmentSubmission.grade (min: 0, max: 20). There is no per-assignment
@@ -24,27 +31,58 @@ const prepareDescription = (taskDescription, descriptionFormat) => {
     return { taskDescription: clean, descriptionFormat: "html" };
 };
 
-// Helper function to format date 
-const formatDueDate = (date) => {
-    const options = {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true
-    };
+// Due dates are rendered in the cohort's zone, not the host's. Without that the
+// formatter echoed back whatever the tutor typed while the stored instant meant
+// an hour later, so the UI agreed with the tutor and only the deadline was wrong.
+const formatDueDate = (date) => formatCohortDateTime(date);
 
-    const formatted = new Intl.DateTimeFormat('en-GB', options).format(date);
+// Who a task is "issued to": the students on its stack, plus everyone when it
+// is General.
+//
+// Assignment.stack is Title Case ("Front End") while User.stack is lowercase
+// ("frontend"), and neither has a schema enum - so the match is a normalized
+// in-memory comparison rather than a Mongo query, the same way the ranking code
+// handles it.
+const studentsForStack = async (stack) => {
+    const students = await User.find({ role: "student" }).select("_id name email stack");
+    if (stack === "General") return students;
 
-    // Add ordinal suffix to day
-    const day = date.getDate();
-    let suffix = 'th';
-    if (day % 10 === 1 && day !== 11) suffix = 'st';
-    else if (day % 10 === 2 && day !== 12) suffix = 'nd';
-    else if (day % 10 === 3 && day !== 13) suffix = 'rd';
+    const normalizeStack = (value) => value?.toLowerCase().replace(/\s+/g, "") ?? "";
+    const target = normalizeStack(stack);
 
-    return formatted.replace(/^\d+/, `${day}${suffix}`);
+    return students.filter((student) => normalizeStack(student.stack) === target);
+};
+
+// Notify the students a newly created task belongs to, in-app and by email.
+// Never throws: announcing a task must not be able to fail creating one.
+const notifyStudentsOfAssignment = async (assignment) => {
+    try {
+        const students = await studentsForStack(assignment.stack);
+        if (!students.length) return;
+
+        const formattedDueDate = formatDueDate(assignment.dueDateTime);
+
+        await notifyUsersSafely({
+            users: students,
+            type: "assignment_posted",
+            title: "New task posted",
+            body: `${assignment.title} is due ${formattedDueDate}.`,
+            link: `/assessments?week=${assignment.week}`,
+            data: { assignment: assignment._id },
+            email: {
+                subject: `New task for Week ${assignment.week}: ${assignment.title}`,
+                payload: (student) => ({
+                    studentName: student.name,
+                    title: assignment.title,
+                    week: assignment.week,
+                    stack: assignment.stack,
+                    formattedDueDate
+                })
+            }
+        });
+    } catch (err) {
+        console.error("Failed to notify students of new assignment:", err.message);
+    }
 };
 
 // ============== ASSIGNMENT MANAGEMENT ==============
@@ -70,20 +108,23 @@ const createAssignment = async (req, res, next) => {
         }
 
 
-        // Combine date and time
-        const [year, month, day] = dueDate.split('-');
-        const [hours, minutes] = dueTime.split(':');
-        const dueDateTime = new Date(year, month - 1, day, hours, minutes);
+        // Combine date and time into the instant that wall clock names in the
+        // cohort's zone. A malformed date or time yields null rather than an
+        // Invalid Date, which used to slip past the cutoff check below.
+        const dueDateTime = parseCohortDateTime(dueDate, dueTime);
+        if (!dueDateTime) {
+            return next(ApiError.badRequest('dueDate must be "YYYY-MM-DD" and dueTime "HH:MM".'));
+        }
 
         // Monday 00:00 of the requested program week, anchored to the configured
         // cohort start date. Without a start date this falls back to the current
         // calendar week, matching the behaviour before program settings existed.
         const mondayOfRequestedWeek = getWeekStart(settings, weekNumber);
 
-        // Calculate the cutoff: 12:00 am Monday of the next week
-        const mondayNextWeek = new Date(mondayOfRequestedWeek);
-        mondayNextWeek.setDate(mondayOfRequestedWeek.getDate() + 7);
-        mondayNextWeek.setHours(0, 0, 0, 0);
+        // The cutoff: 12:00 am Monday of the next week, in the cohort's zone.
+        // Anchoring this to the host's midnight instead let a deadline through
+        // until 00:59 Monday WAT.
+        const mondayNextWeek = cohortMidnightFromLocalDate(mondayOfRequestedWeek, 7);
 
         // Validate dueDateTime is before the next Monday 12:00 am
         if (dueDateTime >= mondayNextWeek) {
@@ -101,6 +142,11 @@ const createAssignment = async (req, res, next) => {
         });
 
         await assignment.save();
+
+        // Announce it to the students it was issued to. notifyUsersSafely
+        // swallows its own failures: a mail server having a bad day must never
+        // turn a successfully created task into an error for the tutor.
+        await notifyStudentsOfAssignment(assignment);
 
         res.status(201).json({
             message: "Assignment created successfully",
@@ -215,41 +261,35 @@ const updateAssignment = async (req, res, next) => {
         if (stack !== undefined) updateFields.stack = stack;
         if (allowLateSubmissions !== undefined) updateFields.allowLateSubmissions = allowLateSubmissions;
 
-        // Handle date/time updates
-        if (dueDate && dueTime) {
-            // Both date and time provided - update dueDateTime
-            const [year, month, day] = dueDate.split('-');
-            const [hours, minutes] = dueTime.split(':');
-            updateFields.dueDateTime = new Date(year, month - 1, day, hours, minutes);
-        } else if (dueDate || dueTime) {
-            // Only one of date or time provided - get current assignment to merge
-            const currentAssignment = await Assignment.findById(assignmentId);
-            if (!currentAssignment) {
-                return next(ApiError.notFound("Assignment not found"));
+        // Handle date/time updates. Every branch resolves to a full cohort wall
+        // clock and parses it in the cohort's zone; the partial branches used to
+        // read the stored instant back with host-zone getters, so editing only
+        // the date silently moved the time of day as well.
+        if (dueDate || dueTime) {
+            let nextDueDate = dueDate;
+            let nextDueTime = dueTime;
+
+            if (!dueDate || !dueTime) {
+                // Only one half provided - merge it with the current value.
+                const currentAssignment = await Assignment.findById(assignmentId);
+                if (!currentAssignment) {
+                    return next(ApiError.notFound("Assignment not found"));
+                }
+
+                const current = splitCohortDateTime(currentAssignment.dueDateTime);
+                if (!current) {
+                    return next(ApiError.badRequest("This assignment has an unreadable due date; set both dueDate and dueTime to repair it."));
+                }
+
+                nextDueDate = dueDate || current.dueDate;
+                nextDueTime = dueTime || current.dueTime;
             }
 
-            const currentDateTime = currentAssignment.dueDateTime;
-            if (dueDate) {
-                // Update only the date part, keep current time
-                const [year, month, day] = dueDate.split('-');
-                updateFields.dueDateTime = new Date(
-                    year, 
-                    month - 1, 
-                    day, 
-                    currentDateTime.getHours(), 
-                    currentDateTime.getMinutes()
-                );
-            } else if (dueTime) {
-                // Update only the time part, keep current date
-                const [hours, minutes] = dueTime.split(':');
-                updateFields.dueDateTime = new Date(
-                    currentDateTime.getFullYear(),
-                    currentDateTime.getMonth(),
-                    currentDateTime.getDate(),
-                    hours,
-                    minutes
-                );
+            const parsed = parseCohortDateTime(nextDueDate, nextDueTime);
+            if (!parsed) {
+                return next(ApiError.badRequest('dueDate must be "YYYY-MM-DD" and dueTime "HH:MM".'));
             }
+            updateFields.dueDateTime = parsed;
         }
 
         // Check if there are any fields to update
