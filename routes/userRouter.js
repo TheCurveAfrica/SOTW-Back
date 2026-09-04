@@ -3,8 +3,8 @@ const express = require('express');
 const router = express.Router();
 
 const { signUp, verify, logIn, forgotPassword, resetPasswordPage, resetPassword, signOut, } = require('../controllers/userController');
-const { checkIn, assessmentData, assessmentDataS, fetchCheckInWeekly, fetchAllCheckInWeekly, fetchAssessmentData, fetchOneAssessmentData, deleteCheckIn, deleteWeekCheckIn, deleteAssessment,  runCheck, confirmPayment, healthCheck} = require('../controllers/punctualityController');
-const { authenticate, } = require("../middleware/authentation");
+const { checkIn, assessmentData, assessmentDataS, fetchCheckInWeekly, fetchAllCheckInWeekly, fetchAttendanceOverview, fetchAssessmentData, fetchOneAssessmentData, deleteCheckIn, deleteWeekCheckIn, deleteAssessment,  runCheck, confirmPayment, healthCheck} = require('../controllers/punctualityController');
+const { authenticate, authorizedTutor, } = require("../middleware/authentation");
 
 const upload = require('../middleware/multer');
 
@@ -181,6 +181,9 @@ router.get("/studentAttendance/:userId", authenticate, fetchCheckInWeekly);
 
 //endpoint to get all students attendance data
 router.get("/groupStudentAttendance", authenticate, fetchAllCheckInWeekly);
+
+//endpoint to get every student with their attendance rolled up (tutors/admins)
+router.get("/attendanceOverview", authorizedTutor, fetchAttendanceOverview);
 
 //endpoint to get all student assessment data for a particular week
 router.get("/fetchAssessment", authenticate, fetchAssessmentData);
