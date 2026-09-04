@@ -13,8 +13,7 @@ const notificationSchema = new mongoose.Schema({
         enum: [
             "assignment_posted",
             "exception_requested",
-            "exception_reviewed",
-            "exception_blocked"
+            "exception_reviewed"
         ],
         required: true
     },
@@ -34,10 +33,7 @@ const notificationSchema = new mongoose.Schema({
     // wants to round-trip on `data` needs a field.
     data: {
         assignment: { type: mongoose.Schema.Types.ObjectId, ref: "Assignment" },
-        exceptionRequest: { type: mongoose.Schema.Types.ObjectId, ref: "ClassExceptionRequest" },
-        // The student an "exception_blocked" notice is about - also the key the
-        // once-a-day dedupe check looks up.
-        blockedStudent: { type: mongoose.Schema.Types.ObjectId, ref: "SOWusers" }
+        exceptionRequest: { type: mongoose.Schema.Types.ObjectId, ref: "ClassExceptionRequest" }
     },
     read: {
         type: Boolean,

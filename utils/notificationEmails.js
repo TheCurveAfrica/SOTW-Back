@@ -27,8 +27,6 @@ const formatDateString = (value) => {
     });
 };
 
-const formatDateList = (dates) => (dates || []).map(formatDateString).join("<br>");
-
 const PARAGRAPH = "font-family: 'Lato', sans-serif; font-size: 18px; font-weight: 300; color: #555555; line-height: 1.6;";
 
 // The shared shell. `heading` is the big grey title, `body` is pre-built HTML.
@@ -141,17 +139,34 @@ const generateTaskPostedEmail = ({ studentName, title, week, stack, formattedDue
     `
 });
 
-const generateExceptionRequestEmail = ({ tutorName, studentName, stack, dates, reasonCategory, reason }) => layout({
-    title: "Class Exception Request",
-    heading: "Class Exception Request",
+// Sits above the detail block when a request came in after the student's
+// ordinary allowance was already spent.
+const emergencyBanner = `
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"
+        style="background-color: #fdecec; border-left: 4px solid #ec1c24; border-radius: 6px; margin: 24px 0;">
+        <tr>
+            <td style="padding: 14px 20px; text-align: left;">
+                <p style="font-family: 'Lato', sans-serif; font-size: 16px; font-weight: 700; color: #ec1c24; margin: 0;">
+                    Emergency request</p>
+                <p style="font-family: 'Lato', sans-serif; font-size: 15px; color: #555555; margin: 4px 0 0 0; line-height: 1.5;">
+                    This student has already used all of their exception days.</p>
+            </td>
+        </tr>
+    </table>
+`;
+
+const generateExceptionRequestEmail = ({ tutorName, studentName, stack, date, isEmergency, reasonCategory, reason }) => layout({
+    title: isEmergency ? "Emergency Class Exception Request" : "Class Exception Request",
+    heading: isEmergency ? "Emergency Request" : "Class Exception Request",
     greeting: tutorName || "there",
     body: `
         <p style="${PARAGRAPH}">
             <strong>${escapeHtml(studentName)}</strong> has requested to be excused from class.
         </p>
+        ${isEmergency ? emergencyBanner : ""}
         ${detailBlock([
             ["Student", `${escapeHtml(studentName)}${stack ? ` &middot; ${escapeHtml(stack)}` : ""}`],
-            ["Class day(s)", formatDateList(dates)],
+            ["Day", formatDateString(date)],
             ["Reason", escapeHtml(reasonCategory)],
             ["Details", escapeHtml(reason)]
         ])}
@@ -159,7 +174,7 @@ const generateExceptionRequestEmail = ({ tutorName, studentName, stack, dates, r
     `
 });
 
-const generateExceptionReviewedEmail = ({ studentName, status, dates, reviewNote }) => {
+const generateExceptionReviewedEmail = ({ studentName, status, date, reviewNote }) => {
     const approved = status === "Approved";
 
     return layout({
@@ -171,12 +186,12 @@ const generateExceptionReviewedEmail = ({ studentName, status, dates, reviewNote
                 Your request to be excused from class has been <strong>${escapeHtml(status.toLowerCase())}</strong>.
             </p>
             ${detailBlock([
-                ["Class day(s)", formatDateList(dates)],
+                ["Day", formatDateString(date)],
                 ...(reviewNote ? [["Note from your tutor", escapeHtml(reviewNote)]] : [])
             ])}
             <p style="${PARAGRAPH} font-size: 16px;">
                 ${approved
-                    ? "These class days are now marked as excused. You are still responsible for catching up on anything covered."
+                    ? "This day is now marked as excused. You are still responsible for catching up on anything covered."
                     : "Please speak with your tutor if you still need to be away."}
             </p>
             ${button(`${APP_URL}/checkin`, "View your requests")}
