@@ -1,11 +1,11 @@
 const mongoose = require("mongoose");
 
-// A student's request to be excused from one or more class days.
+// A student's request to be excused from a single class day.
 //
-// The allowance (see QUOTA in controllers/classExceptionController.js) is
-// enforced server-side and deliberately never serialized to students, so the
-// shape of this document is split by audience at the controller boundary
-// rather than here.
+// Each student gets an allowance of these per program (QUOTA in
+// controllers/classExceptionController.js). Once it is spent they can still
+// file emergency requests, which sit outside the allowance and are flagged with
+// isEmergency below.
 const classExceptionRequestSchema = new mongoose.Schema({
     student: {
         type: mongoose.Schema.Types.ObjectId,
@@ -13,16 +13,31 @@ const classExceptionRequestSchema = new mongoose.Schema({
         required: true,
         index: true
     },
-    // "YYYY-MM-DD" strings rather than Dates, matching dataModel.date so the
-    // two can be compared without timezone conversion. Every entry is a class
-    // day (Mon/Wed/Fri per utils/attendance.js), validated in the controller.
-    dates: {
-        type: [String],
+    // "YYYY-MM-DD" rather than a Date, matching dataModel.date so the two can be
+    // compared without timezone conversion. Always an eligible day
+    // (EXCEPTION_DAYS in the controller: Mon/Wed/Fri, plus Sat).
+    date: {
+        type: String,
         required: true
+    },
+    // Filed after the allowance ran out. Does not consume the allowance - it
+    // only exists once there is none left - and only one may be Pending at a
+    // time, so an out-of-days student cannot queue up a backlog for tutors.
+    isEmergency: {
+        type: Boolean,
+        default: false
     },
     reasonCategory: {
         type: String,
-        enum: ["Medical", "Family emergency", "Work / Interview", "Travel", "Bereavement", "Other"],
+        enum: [
+            "Medical",
+            "Family emergency",
+            "Work / Interview",
+            "Travel",
+            "Bereavement",
+            "Extra-curricular event",
+            "Other"
+        ],
         required: true
     },
     reason: {
@@ -71,7 +86,7 @@ const classExceptionRequestSchema = new mongoose.Schema({
     }
 }, { timestamps: true });
 
-// The quota count filters on exactly these three fields.
-classExceptionRequestSchema.index({ student: 1, programStartDate: 1, status: 1 });
+// The allowance count filters on exactly these four fields.
+classExceptionRequestSchema.index({ student: 1, programStartDate: 1, status: 1, isEmergency: 1 });
 
 module.exports = mongoose.model("ClassExceptionRequest", classExceptionRequestSchema);
