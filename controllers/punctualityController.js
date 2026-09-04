@@ -1,4 +1,8 @@
 const userModel = require("../models/userModel");
+// The roster lives in models/users.js (`SOWusers`), not the legacy userModel
+// (`SOWuser`) above - both resolve to the `sowusers` collection, but only this
+// one carries name/email/stack/role.
+const User = require("../models/users");
 const dataModel = require("../models/dataModel");
 const assessmentModel = require("../models/assessmentModel");
 const { validateUserLocation, } = require("../middleware/validator");
@@ -8,11 +12,48 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 const sharp = require("sharp");
-const { cohortNow, isClassDay, punctualityScoreFor } = require("../utils/attendance");
+const { cohortNow, isClassDay, punctualityScoreFor, CLASS_DAYS, ON_TIME_SCORE } = require("../utils/attendance");
+const { getProgramSettings, parseDateString, getWeekStart } = require("../utils/programWeek");
 
 const _ = require('lodash');
 //const paymentModel = require("../model/ConfirmPayment");
 require('dotenv').config();
+
+
+const pad = (n) => String(n).padStart(2, "0");
+
+// "YYYY-MM-DD" from a host-local Date. utils/programWeek builds its Mondays with
+// host-local setters, so host-local getters are what recover the calendar day it
+// meant; toISOString() would shift the day west of Greenwich.
+const toDateString = (date) =>
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+
+// The Mon-Sun window of a program week, as the "YYYY-MM-DD" strings that
+// dataModel.date - a String, not a Date - is compared against.
+const weekRange = (settings, week) => {
+    const from = getWeekStart(settings, week);
+    const to = new Date(from);
+    to.setDate(to.getDate() + 6);
+    return { from: toDateString(from), to: toDateString(to) };
+};
+
+// How many class days have already come and gone inside a window. Clamped to
+// `today` because a class day still in the future is not one anyone has missed.
+const classDaysElapsed = (fromStr, toStr, todayStr) => {
+    const start = parseDateString(fromStr);
+    const end = parseDateString(toStr > todayStr ? todayStr : toStr);
+    if (!start || !end || end < start) return 0;
+
+    let count = 0;
+    for (let day = new Date(start); day <= end; day.setDate(day.getDate() + 1)) {
+        if (CLASS_DAYS.includes(day.getDay())) count++;
+    }
+    return count;
+};
+
+// A user-supplied search term goes into a $regex, so the regex metacharacters in
+// it have to stop meaning anything first.
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 
 // Function to handle the attendance of st udents
@@ -702,26 +743,27 @@ const fetchCheckInWeekly = async (req, res) => {
     try {
 
         const userId = req.params.userId
-        // Get the current date
-        const currentDate = new Date();
 
-        // Calculate the start of the current week
-        const startOfWeek = new Date(currentDate);
-        startOfWeek.setDate(currentDate.getDate() - currentDate.getDay());
+        // Despite the name this returns the student's whole history by default -
+        // the date filter below is opt-in. Passing ?week=N narrows it to that
+        // program week; without the param the response is what it has always
+        // been, which the callers that page through a full history rely on.
+        const query = { userId: userId };
 
-        // Calculate the end of the current week
-        const endOfWeek = new Date(startOfWeek);
-        endOfWeek.setDate(startOfWeek.getDate() + 6);
-        endOfWeek.setHours(23, 59, 59, 999);
+        if (req.query.week !== undefined && req.query.week !== "") {
+            const requestedWeek = Number(req.query.week);
+            if (!Number.isInteger(requestedWeek) || requestedWeek < 1) {
+                return res.status(400).json({
+                    message: "week must be a positive integer",
+                });
+            }
 
-        // Fetch attendance data for the current week
-        const attendanceData = await dataModel.find({
-            userId: userId,
-            // date: {
-            //     $gte: startOfWeek.toISOString().split('T')[0],
-            //     $lte: endOfWeek.toISOString().split('T')[0]
-            // }
-        });
+            const settings = await getProgramSettings();
+            const range = weekRange(settings, requestedWeek);
+            query.date = { $gte: range.from, $lte: range.to };
+        }
+
+        const attendanceData = await dataModel.find(query);
 
         if (!attendanceData) {
             return res.status(400).json({
@@ -818,6 +860,147 @@ const fetchAllCheckInWeekly = async (req, res) => {
     }
 }
 
+
+/**
+ * Every student with their attendance rolled up - the tutor-facing "Attendance
+ * Records" table.
+ *
+ * Summary only. The individual check-ins behind a row are fetched per student by
+ * fetchCheckInWeekly when that row is expanded, so this response stays small no
+ * matter how long the cohort has been running.
+ *
+ * Query: ?week=N (a program week; omitted means all-time), ?search=, ?stack=.
+ */
+const fetchAttendanceOverview = async (req, res) => {
+    try {
+        let requestedWeek = null;
+        if (req.query.week !== undefined && req.query.week !== "") {
+            requestedWeek = Number(req.query.week);
+            if (!Number.isInteger(requestedWeek) || requestedWeek < 1) {
+                return res.status(400).json({
+                    message: "week must be a positive integer",
+                });
+            }
+        }
+
+        const settings = await getProgramSettings();
+        const range = requestedWeek === null ? null : weekRange(settings, requestedWeek);
+
+        // `stack` has no enum on the user schema, so this is an exact match the
+        // client only sends when it holds a value it got from the server.
+        const studentQuery = { role: "student" };
+        if (req.query.stack) studentQuery.stack = req.query.stack;
+        if (req.query.search) {
+            const term = escapeRegex(String(req.query.search).trim());
+            if (term) {
+                studentQuery.$or = [
+                    { name: { $regex: term, $options: "i" } },
+                    { email: { $regex: term, $options: "i" } },
+                ];
+            }
+        }
+
+        const students = await User.find(studentQuery)
+            .select("name email image stack")
+            .sort({ name: 1 });
+
+        // No roster means no rollup to do, and an empty $in would match every
+        // document rather than none.
+        if (students.length === 0) {
+            return res.status(200).json({
+                message: "Attendance overview fetched successfully",
+                week: requestedWeek,
+                range,
+                maxScore: ON_TIME_SCORE,
+                students: [],
+            });
+        }
+
+        const match = { userId: { $in: students.map((student) => student._id) } };
+        if (range) match.date = { $gte: range.from, $lte: range.to };
+
+        const rollup = await dataModel.aggregate([
+            { $match: match },
+            {
+                $group: {
+                    // userId is an array holding a single id - see models/dataModel.js.
+                    _id: { $arrayElemAt: ["$userId", 0] },
+                    presentCount: { $sum: { $cond: [{ $eq: ["$status", "excused"] }, 0, 1] } },
+                    excusedCount: { $sum: { $cond: [{ $eq: ["$status", "excused"] }, 1, 0] } },
+                    // Excused days carry a 0 that must never reach an average, so
+                    // they stay out of both the total and the divisor. Legacy rows
+                    // written before the enum existed have no status at all, and
+                    // correctly fall through as present.
+                    scoreTotal: { $sum: { $cond: [{ $eq: ["$status", "excused"] }, 0, "$punctualityScore"] } },
+                    scoredCount: { $sum: { $cond: [{ $eq: ["$status", "excused"] }, 0, 1] } },
+                    firstDate: { $min: "$date" },
+                    lastDate: { $max: "$date" },
+                },
+            },
+        ]);
+
+        const byStudent = new Map(rollup.map((row) => [String(row._id), row]));
+
+        const today = cohortNow().format("YYYY-MM-DD");
+        // The window missed days are counted over: the requested week, or the
+        // whole program. With no start date configured, fall back to the earliest
+        // check-in anyone has on record.
+        const earliestRecord = rollup.reduce(
+            (earliest, row) =>
+                row.firstDate && (!earliest || row.firstDate < earliest) ? row.firstDate : earliest,
+            null
+        );
+        const countFrom = range
+            ? range.from
+            : parseDateString(settings?.startDate)
+                ? settings.startDate
+                : earliestRecord;
+        const classDays = countFrom
+            ? classDaysElapsed(countFrom, range ? range.to : today, today)
+            : 0;
+
+        const payload = students.map((student) => {
+            const row = byStudent.get(String(student._id));
+            const presentCount = row ? row.presentCount : 0;
+            const excusedCount = row ? row.excusedCount : 0;
+            const scoredCount = row ? row.scoredCount : 0;
+
+            return {
+                _id: student._id,
+                name: student.name,
+                email: student.email,
+                image: student.image,
+                stack: student.stack,
+                presentCount,
+                excusedCount,
+                // A student who joined mid-program can show more class days than
+                // they were ever enrolled for, so this floors at 0 rather than
+                // reporting a negative.
+                missedCount: Math.max(classDays - presentCount - excusedCount, 0),
+                averagePunctualityScore:
+                    scoredCount === 0
+                        ? null
+                        : Math.round((row.scoreTotal / scoredCount) * 100) / 100,
+                lastCheckIn: row ? row.lastDate : null,
+            };
+        });
+
+        // A roster with no attendance yet is an empty table, not an error - unlike
+        // the older handlers above, which 400 on it.
+        return res.status(200).json({
+            message: "Attendance overview fetched successfully",
+            week: requestedWeek,
+            range,
+            maxScore: ON_TIME_SCORE,
+            students: payload,
+        });
+
+    } catch (error) {
+        return res.status(500).json({
+            message: 'Internal Server Error: ' + error.message,
+        });
+    }
+}
 
 
 //Function to fetch weekly assessment data for students
@@ -1115,6 +1298,7 @@ module.exports = {
     assessmentDataS,
     fetchCheckInWeekly,
     fetchAllCheckInWeekly,
+    fetchAttendanceOverview,
     fetchAssessmentData,
     fetchOneAssessmentData,
     deleteCheckIn,
