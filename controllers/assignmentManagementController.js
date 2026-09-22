@@ -43,11 +43,26 @@ const formatDueDate = (date) => formatCohortDateTime(date);
 // ("frontend"), and neither has a schema enum - so the match is a normalized
 // in-memory comparison rather than a Mongo query, the same way the ranking code
 // handles it.
+const normalizeStack = (value) => (value || "").toLowerCase().replace(/\s+/g, "");
+
+// Signup stores "frontend"; assignments store "Front End". Mongo $in does not
+// normalize, so a student's workload query has to go through this map.
+const ASSIGNMENT_STACK_BY_NORMALIZED = {
+    frontend: "Front End",
+    backend: "Back End",
+    productdesign: "Product Design"
+};
+
+const assignmentStacksFor = (stack) => {
+    const label = ASSIGNMENT_STACK_BY_NORMALIZED[normalizeStack(stack)];
+    if (!label) return ["General"];
+    return [label, "General"];
+};
+
 const studentsForStack = async (stack) => {
     const students = await User.find({ role: "student" }).select("_id name email stack");
     if (stack === "General") return students;
 
-    const normalizeStack = (value) => value?.toLowerCase().replace(/\s+/g, "") ?? "";
     const target = normalizeStack(stack);
 
     return students.filter((student) => normalizeStack(student.stack) === target);
@@ -620,13 +635,10 @@ const getStudentPerformanceReview = async (req, res, next) => {
             return next(ApiError.notFound("Student not found"));
         }
 
-        // Normalize stack for matching
-        const normalizeStack = (stack) => stack?.toLowerCase().replace(/\s+/g, "");
-        const stacksToInclude = [student.stack, "General"];
-
-        // Get all assignments for student's stack and 'General'
+        // Get all assignments for student's stack and 'General'.
+        // User.stack ("frontend") is mapped onto Assignment.stack ("Front End").
         const assignments = await Assignment.find({
-            stack: { $in: stacksToInclude }
+            stack: { $in: assignmentStacksFor(student.stack) }
         }).sort({ week: -1 });
 
         // Get all submissions for this student
@@ -698,7 +710,7 @@ const getStudentAssignmentScores = async (req, res, next) => {
 
         // Match getStudentPerformanceReview: a student's workload is their own
         // stack plus anything issued to "General".
-        const query = { stack: { $in: [student.stack, "General"] } };
+        const query = { stack: { $in: assignmentStacksFor(student.stack) } };
 
         let requestedWeek = null;
         if (req.query.week !== undefined && req.query.week !== "") {
