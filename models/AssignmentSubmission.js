@@ -42,7 +42,20 @@ const assignmentSubmissionSchema = new mongoose.Schema({
         type: Number,
         min: 0,
         max: 20
-    }
+    },
+    // One mark per assignment criterion. Empty when the assignment has no rubric;
+    // when it does, grade is the sum of these scores.
+    criterionScores: [{
+        criterion: {
+            type: mongoose.Schema.Types.ObjectId,
+            required: true
+        },
+        score: {
+            type: Number,
+            required: true,
+            min: 0
+        }
+    }]
 }, {
     timestamps: true
 });

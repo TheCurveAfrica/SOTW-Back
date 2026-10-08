@@ -208,15 +208,31 @@ const studentDashboard = async (req, res, next) => {
       (a) => !submittedAssignmentIds.includes(a._id.toString())
     ).length;
 
-    const graded = submissions.filter((s) => s.grade !== undefined);
+    const ratings = await Ratings.find({ student: studentId })
+      .select("week punctuality Assignments personalDefense classParticipation classAssessment total")
+      .sort({ week: -1 })
+      .lean();
 
-    const avgScore =
-      graded.length > 0
-        ? (
-            graded.reduce((acc, curr) => acc + curr.grade, 0) /
-            graded.length
-          ).toFixed(1)
-        : 0;
+    const gradingHistory = ratings.map((rating) => ({
+      week: rating.week,
+      punctuality: rating.punctuality,
+      Assignments: rating.Assignments,
+      personalDefense: rating.personalDefense,
+      classParticipation: rating.classParticipation,
+      classAssessment: rating.classAssessment,
+      total: rating.total,
+    }));
+
+    // Mean of weekly totals, matching overallRating and the profile average.
+    // A missing total counts as 0. No rated weeks means 0.
+    const avgScore = gradingHistory.length > 0
+      ? Number(
+          (
+            gradingHistory.reduce((sum, rating) => sum + (rating.total || 0), 0) /
+            gradingHistory.length
+          ).toFixed(2)
+        )
+      : 0;
 
     res.status(200).json({
       student,
@@ -225,6 +241,7 @@ const studentDashboard = async (req, res, next) => {
         completed,
         pending,
       },
+      gradingHistory,
     });
   } catch (err) {
     next(ApiError.badRequest(err.message));

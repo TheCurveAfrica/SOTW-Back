@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Assignment = require("../models/Assignment");
 const AssignmentSubmission = require("../models/AssignmentSubmission");
 const User = require("../models/users");
@@ -16,7 +17,133 @@ const { notifyUsersSafely } = require("../services/notificationService");
 // Every assignment is graded on the same 0-20 scale, enforced by
 // AssignmentSubmission.grade (min: 0, max: 20). There is no per-assignment
 // maxScore field, so this is the single source of truth for the ceiling.
+// When the assignment has criteria, the grade is the sum of those scores.
 const MAX_ASSIGNMENT_SCORE = 20;
+
+// Points are stored to the hundredth so 6.67 + 6.67 + 6.66 can equal 20 without
+// a floating-point remainder deciding the validation.
+const roundPoints = (value) => Math.round(Number(value) * 100) / 100;
+
+// Returns an error message, or null when the rubric is a valid split of 20.
+// An omitted or empty list is not passed here: that means "no rubric".
+const validateCriteria = (criteria) => {
+    if (!Array.isArray(criteria) || criteria.length === 0) {
+        return "Add at least one grading criterion, or omit criteria to grade with a single score";
+    }
+
+    const seenIds = new Set();
+    for (const criterion of criteria) {
+        const label = criterion && typeof criterion.label === "string" ? criterion.label.trim() : "";
+        if (!label) {
+            return "Each criterion needs a label";
+        }
+
+        const maxPoints = roundPoints(criterion.maxPoints);
+        if (!Number.isFinite(maxPoints) || maxPoints <= 0 || maxPoints > MAX_ASSIGNMENT_SCORE) {
+            return `Each criterion's maxPoints must be greater than 0 and at most ${MAX_ASSIGNMENT_SCORE}`;
+        }
+
+        if (criterion._id !== undefined && criterion._id !== null && criterion._id !== "") {
+            const id = String(criterion._id);
+            if (!mongoose.Types.ObjectId.isValid(id)) {
+                return "Each criterion id must be a valid id";
+            }
+            if (seenIds.has(id)) {
+                return "Each criterion id must be unique";
+            }
+            seenIds.add(id);
+        }
+    }
+
+    const total = roundPoints(criteria.reduce((sum, criterion) => sum + roundPoints(criterion.maxPoints), 0));
+    if (total !== MAX_ASSIGNMENT_SCORE) {
+        return `Criterion maxima must add up to ${MAX_ASSIGNMENT_SCORE}`;
+    }
+
+    return null;
+};
+
+// Keeps ids the client already has so a later grade can refer to the same criterion.
+const normalizeCriteria = (criteria) => criteria.map((criterion) => {
+    const next = {
+        label: criterion.label.trim(),
+        maxPoints: roundPoints(criterion.maxPoints)
+    };
+    if (criterion._id !== undefined && criterion._id !== null && criterion._id !== "") {
+        next._id = criterion._id;
+    }
+    return next;
+});
+
+// True when this payload is asking to set or clear the rubric.
+const criteriaWereSent = (criteria) => criteria !== undefined;
+
+// [] and a missing field both mean "grade with one score". Anything else is a rubric.
+const criteriaToStore = (criteria) => {
+    if (!Array.isArray(criteria) || criteria.length === 0) return [];
+    return normalizeCriteria(criteria);
+};
+
+const assignmentHasGrade = (assignmentId) => AssignmentSubmission.exists({
+    assignment: assignmentId,
+    grade: { $type: "number" }
+});
+
+// One query for the whole list, not one per assignment.
+const lockedAssignmentIds = async (assignmentIds) => {
+    if (!assignmentIds.length) return new Set();
+    const graded = await AssignmentSubmission.distinct("assignment", {
+        assignment: { $in: assignmentIds },
+        grade: { $type: "number" }
+    });
+    return new Set(graded.map((id) => String(id)));
+};
+
+const formatAssignment = (assignment, criteriaLocked = false) => ({
+    ...assignment.toObject(),
+    formattedDueDate: formatDueDate(assignment.dueDateTime),
+    criteriaLocked
+});
+
+const withCriteriaLock = async (assignments) => {
+    const locked = await lockedAssignmentIds(assignments.map((assignment) => assignment._id));
+    return assignments.map((assignment) => formatAssignment(assignment, locked.has(String(assignment._id))));
+};
+
+// Every criterion once, each score inside that criterion's maximum. The total
+// is what gets stored as the submission grade; a grade in the request is ignored.
+const parseCriterionScores = (criteria, criterionScores) => {
+    if (!Array.isArray(criterionScores)) {
+        return { error: "criterionScores must list a score for every criterion" };
+    }
+    if (criterionScores.length !== criteria.length) {
+        return { error: "Score every criterion exactly once" };
+    }
+
+    const byId = new Map(criteria.map((criterion) => [String(criterion._id), criterion]));
+    const seen = new Set();
+    const scores = [];
+
+    for (const entry of criterionScores) {
+        const id = entry && entry.criterion != null ? String(entry.criterion) : "";
+        const criterion = byId.get(id);
+        if (!criterion || seen.has(id)) {
+            return { error: "Score every criterion exactly once" };
+        }
+        seen.add(id);
+
+        const score = roundPoints(entry.score);
+        if (!Number.isFinite(score) || score < 0 || score > criterion.maxPoints) {
+            return { error: `"${criterion.label}" must be scored between 0 and ${criterion.maxPoints}` };
+        }
+        scores.push({ criterion: criterion._id, score });
+    }
+
+    return {
+        scores,
+        total: roundPoints(scores.reduce((sum, entry) => sum + entry.score, 0))
+    };
+};
 
 // Rich-text descriptions arrive as HTML and must be sanitized before they are stored;
 // plain-text ones are kept verbatim. Returns null when the description carries no real text.
@@ -105,7 +232,7 @@ const notifyStudentsOfAssignment = async (assignment) => {
 // Create Assignment
 const createAssignment = async (req, res, next) => {
     try {
-        const { week, title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { week, title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions, criteria } = req.body;
 
         if (!week || week < 1 || !title || !taskDescription || !stack || !dueDate || !dueTime) {
             return next(ApiError.badRequest("Missing required fields"));
@@ -146,6 +273,16 @@ const createAssignment = async (req, res, next) => {
             return next(ApiError.badRequest("Due date/time must be before 12:00 am Monday of the next week for the selected week."));
         }
 
+        // A rubric is optional. When one is sent it has to be a complete split of 20.
+        if (criteriaWereSent(criteria) && Array.isArray(criteria) && criteria.length > 0) {
+            const criteriaError = validateCriteria(criteria);
+            if (criteriaError) {
+                return next(ApiError.badRequest(criteriaError));
+            }
+        } else if (criteriaWereSent(criteria) && !Array.isArray(criteria)) {
+            return next(ApiError.badRequest("criteria must be a list"));
+        }
+
         const assignment = new Assignment({
             week,
             title,
@@ -153,7 +290,8 @@ const createAssignment = async (req, res, next) => {
             descriptionFormat: description.descriptionFormat,
             stack,
             dueDateTime,
-            allowLateSubmissions
+            allowLateSubmissions,
+            criteria: criteriaToStore(criteria)
         });
 
         await assignment.save();
@@ -165,10 +303,7 @@ const createAssignment = async (req, res, next) => {
 
         res.status(201).json({
             message: "Assignment created successfully",
-            assignment: {
-                ...assignment.toObject(),
-                formattedDueDate: formatDueDate(assignment.dueDateTime)
-            }
+            assignment: formatAssignment(assignment, false)
         });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
@@ -189,12 +324,7 @@ const getAssignmentsByWeekAndStack = async (req, res, next) => {
         })
         .sort({ createdAt: -1 });
 
-        const formattedAssignments = assignments.map(assignment => ({
-            ...assignment.toObject(),
-            formattedDueDate: formatDueDate(assignment.dueDateTime)
-        }));
-
-        res.status(200).json({ assignments: formattedAssignments });
+        res.status(200).json({ assignments: await withCriteriaLock(assignments) });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
     }
@@ -227,12 +357,7 @@ const getAssignmentsByWeek = async (req, res, next) => {
             stack: { $in: stacks }
         }).sort({ dueDateTime: 1, createdAt: -1 });
 
-        const formattedAssignments = assignments.map(assignment => ({
-            ...assignment.toObject(),
-            formattedDueDate: formatDueDate(assignment.dueDateTime)
-        }));
-
-        res.status(200).json({ assignments: formattedAssignments });
+        res.status(200).json({ assignments: await withCriteriaLock(assignments) });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
     }
@@ -244,12 +369,7 @@ const getAllAssignments = async (req, res, next) => {
         const assignments = await Assignment.find()
             .sort({ week: -1, stack: 1, createdAt: -1 });
 
-        const formattedAssignments = assignments.map(assignment => ({
-            ...assignment.toObject(),
-            formattedDueDate: formatDueDate(assignment.dueDateTime)
-        }));
-
-        res.status(200).json({ assignments: formattedAssignments });
+        res.status(200).json({ assignments: await withCriteriaLock(assignments) });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
     }
@@ -259,10 +379,27 @@ const getAllAssignments = async (req, res, next) => {
 const updateAssignment = async (req, res, next) => {
     try {
         const { assignmentId } = req.params;
-        const { title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions } = req.body;
+        const { title, taskDescription, descriptionFormat, stack, dueDate, dueTime, allowLateSubmissions, criteria } = req.body;
 
         // Build update object with only provided fields
         const updateFields = {};
+
+        // The rubric freezes once any submission has a score. Other fields stay editable.
+        if (criteriaWereSent(criteria)) {
+            if (await assignmentHasGrade(assignmentId)) {
+                return next(ApiError.badRequest("Criteria cannot be changed after a submission has been graded"));
+            }
+            if (!Array.isArray(criteria)) {
+                return next(ApiError.badRequest("criteria must be a list"));
+            }
+            if (criteria.length > 0) {
+                const criteriaError = validateCriteria(criteria);
+                if (criteriaError) {
+                    return next(ApiError.badRequest(criteriaError));
+                }
+            }
+            updateFields.criteria = criteriaToStore(criteria);
+        }
 
         if (title !== undefined) updateFields.title = title;
         if (taskDescription !== undefined) {
@@ -324,12 +461,11 @@ const updateAssignment = async (req, res, next) => {
             return next(ApiError.notFound("Assignment not found"));
         }
 
+        const criteriaLocked = Boolean(await assignmentHasGrade(assignment._id));
+
         res.status(200).json({
             message: "Assignment updated successfully",
-            assignment: {
-                ...assignment.toObject(),
-                formattedDueDate: formatDueDate(assignment.dueDateTime)
-            }
+            assignment: formatAssignment(assignment, criteriaLocked)
         });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
@@ -511,29 +647,45 @@ const getSubmissionById = async (req, res, next) => {
 const gradeSubmission = async (req, res, next) => {
     try {
         const { submissionId } = req.params;
-        const { grade, feedback } = req.body;
+        const { grade, feedback, criterionScores } = req.body;
 
-        // Validate grade. Coerced explicitly so a numeric string is range-checked
-        // as a number, and tested with Number.isFinite so a legitimate 0 is stored
-        // rather than rejected as falsy.
-        const numericGrade = Number(grade);
-        if (!Number.isFinite(numericGrade) || numericGrade < 0 || numericGrade > MAX_ASSIGNMENT_SCORE) {
-            return next(ApiError.badRequest(`Grade must be between 0 and ${MAX_ASSIGNMENT_SCORE}`));
-        }
-
-        // Verify submission exists
         const submission = await AssignmentSubmission.findById(submissionId);
         if (!submission) {
             return next(ApiError.notFound("Submission not found"));
         }
 
+        const assignment = await Assignment.findById(submission.assignment);
+        if (!assignment) {
+            return next(ApiError.notFound("Assignment not found"));
+        }
+
         // Captured before the assignment below, otherwise the message always
         // reads "updated"
         const wasGraded = submission.grade !== undefined && submission.grade !== null;
+        const rubric = assignment.criteria || [];
 
-        // Update submission with grade and feedback. Feedback is only overwritten
-        // when the caller sent the key, so a grade-only save keeps any existing comment.
-        submission.grade = numericGrade;
+        if (rubric.length > 0) {
+            const parsed = parseCriterionScores(rubric, criterionScores);
+            if (parsed.error) {
+                return next(ApiError.badRequest(parsed.error));
+            }
+            // The stored grade is the sum. A grade sent alongside the breakdown is ignored.
+            submission.criterionScores = parsed.scores;
+            submission.grade = parsed.total;
+        } else {
+            // No rubric: the single 0-20 score, same as before criteria existed.
+            // Coerced explicitly so a numeric string is range-checked as a number,
+            // and tested with Number.isFinite so a legitimate 0 is stored.
+            const numericGrade = Number(grade);
+            if (!Number.isFinite(numericGrade) || numericGrade < 0 || numericGrade > MAX_ASSIGNMENT_SCORE) {
+                return next(ApiError.badRequest(`Grade must be between 0 and ${MAX_ASSIGNMENT_SCORE}`));
+            }
+            submission.grade = numericGrade;
+            submission.criterionScores = [];
+        }
+
+        // Feedback is only overwritten when the caller sent the key, so a
+        // score-only save keeps any existing remark.
         if (feedback !== undefined) submission.feedback = feedback;
         submission.status = "Graded";
         await submission.save();
@@ -541,7 +693,8 @@ const gradeSubmission = async (req, res, next) => {
         res.status(200).json({
             message: wasGraded ? "Grade updated successfully" : "Assignment graded successfully",
             grade: submission.grade,
-            feedback: submission.feedback
+            feedback: submission.feedback,
+            criterionScores: submission.criterionScores
         });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
@@ -566,7 +719,9 @@ const getSubmissionsByWeek = async (req, res, next) => {
             assignment: { $in: assignmentIds }
         })
             .populate('student', 'name image stack')
-            .populate('assignment', 'title stack');
+            .populate('assignment', 'title stack criteria');
+
+        const locked = await lockedAssignmentIds(assignmentIds);
 
         // Group submissions by student
         const studentMap = new Map();
@@ -581,13 +736,18 @@ const getSubmissionsByWeek = async (req, res, next) => {
                 });
             }
 
+            const assignment = submission.assignment.toObject();
+            assignment.criteriaLocked = locked.has(String(assignment._id));
+
             studentMap.get(studentId).assignments.push({
                 submissionId: submission._id,
-                assignment: submission.assignment,
+                assignment,
                 submissionLink: submission.submissionLink,
                 submittedAt: submission.submittedAt,
                 isLate: submission.isLate,
-                grade: submission.grade || null
+                grade: submission.grade ?? null,
+                feedback: submission.feedback ?? null,
+                criterionScores: submission.criterionScores || []
             });
         });
 
@@ -613,10 +773,19 @@ const getSubmissionsByAssignment = async (req, res, next) => {
 
         const submissions = await AssignmentSubmission.find({ assignment: assignmentId })
             .populate('student', 'name image stack')
-            .populate('assignment', 'title week stack taskDescription descriptionFormat')
+            .populate('assignment', 'title week stack taskDescription descriptionFormat criteria')
             .sort({ submittedAt: -1 });
 
-        res.status(200).json({ submissions });
+        const criteriaLocked = Boolean(await assignmentHasGrade(assignmentId));
+        const payload = submissions.map((submission) => {
+            const obj = submission.toObject();
+            if (obj.assignment && typeof obj.assignment === "object") {
+                obj.assignment.criteriaLocked = criteriaLocked;
+            }
+            return obj;
+        });
+
+        res.status(200).json({ submissions: payload });
     } catch (err) {
         next(ApiError.badRequest(`${err}`));
     }
@@ -676,12 +845,16 @@ const getStudentPerformanceReview = async (req, res, next) => {
         const assessments = assignments.map(assignment => {
             const submission = submissionsMap.get(String(assignment._id));
             const week = assignment.week;
+            const isGraded = !!submission && submission.grade !== undefined && submission.grade !== null;
             return {
                 week,
                 assessmentTitle: assignment.title,
                 dueDate: assignment.dueDateTime,
                 score: submission ? submission.grade ?? null : null,
-                status: submission ? (submission.grade !== undefined && submission.grade !== null ? "Graded" : "Pending") : "Not Submitted"
+                criteria: assignment.criteria || [],
+                criterionScores: isGraded ? (submission.criterionScores || []) : [],
+                feedback: submission ? submission.feedback ?? null : null,
+                status: submission ? (isGraded ? "Graded" : "Pending") : "Not Submitted"
             };
         });
 
@@ -751,6 +924,9 @@ const getStudentAssignmentScores = async (req, res, next) => {
                 submittedAt: submission ? submission.submittedAt : null,
                 isLate: submission ? submission.isLate : false,
                 grade: isGraded ? submission.grade : null,
+                criteria: assignment.criteria || [],
+                criterionScores: isGraded ? (submission.criterionScores || []) : [],
+                feedback: submission ? submission.feedback ?? null : null,
                 status: !submission ? "Not Submitted" : isGraded ? "Graded" : "Pending"
             });
         });

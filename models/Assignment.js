@@ -1,5 +1,21 @@
 const mongoose = require("mongoose");
 
+// A rubric splits the assignment's 0-20 score. An empty list means the tutor
+// still enters one score. When the list is present, the controller requires
+// the maxima to add up to 20.
+const criterionSchema = new mongoose.Schema({
+    label: {
+        type: String,
+        required: true,
+        trim: true
+    },
+    maxPoints: {
+        type: Number,
+        required: true,
+        min: 0
+    }
+});
+
 const assignmentSchema = new mongoose.Schema({
     week: {
         type: Number,
@@ -33,6 +49,10 @@ const assignmentSchema = new mongoose.Schema({
     allowLateSubmissions: {
         type: Boolean,
         default: false
+    },
+    criteria: {
+        type: [criterionSchema],
+        default: []
     },
 }, {
     timestamps: true
